@@ -11,6 +11,7 @@ Quick command-line updates for the job tracker database.
   python jobs.py find acme                             search roles
   python jobs.py list --status applied                 list roles by status
   python jobs.py scrape                                pull new roles (same as daily_jobs.py)
+  python jobs.py descriptions                          fetch missing ZipRecruiter descriptions
 
 Statuses: not_applied, interested, applied, interviewing, offer, rejected, withdrawn, closed, not_a_fit
 (closed = no longer accepting applications)
@@ -131,6 +132,8 @@ def main():
     l.add_argument("--status", help="comma-separated statuses")
 
     sub.add_parser("scrape", help="pull new roles now")
+    de = sub.add_parser("descriptions", help="fetch missing ZipRecruiter descriptions for roles you have")
+    de.add_argument("--no-ai", action="store_true", help="don't AI-screen the roles that get a description")
 
     args = ap.parse_args()
     try:
@@ -225,6 +228,15 @@ def main():
             daily_jobs.run()
         except db.RunInProgress as e:
             sys.exit(str(e))
+
+    elif args.cmd == "descriptions":
+        import daily_jobs
+        try:
+            r = daily_jobs.backfill_zip_descriptions(use_ai=not args.no_ai)
+        except db.RunInProgress as e:
+            sys.exit(str(e))
+        print(f"✓ {len(r['described'])} of {r['missing']} ZipRecruiter role(s) now have a description"
+              + (f"; AI screened {r['ai']['screened']} (${r['ai']['cost']:.4f})" if r["ai"] else ""))
 
 
 if __name__ == "__main__":

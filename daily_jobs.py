@@ -26,6 +26,7 @@ import argparse
 import datetime as dt
 import json
 import math
+import random
 import re
 import sys
 import time
@@ -144,6 +145,111 @@ def fetch_jobs(prefs: dict, log=print, stats: dict | None = None) -> list[dict]:
         log(f"  {len(df)} results")
         time.sleep(2)
     return list(jobs.values())
+
+
+# ----------------------------------------------------------------------------
+# ZipRecruiter descriptions
+# ----------------------------------------------------------------------------
+# JobSpy fetches every ZipRecruiter job page back to back; after about 20 requests
+# ZipRecruiter starts refusing them, and the rest of the jobs come back with no
+# description. So afterwards we fetch the missing ones again, slowly, and only for
+# listings we'd actually keep.
+ZIP_PAUSE = (4.0, 8.0)        # seconds between job pages
+ZIP_BACKOFF = 30.0            # extra wait after a refused request (grows with each in a row)
+ZIP_MAX_FAILURES = 3          # give up for this pull after this many refusals in a row
+ZIP_MAX_FETCHES = 50          # at most this many per pull, to keep pulls from running long
+
+
+def _zip_fetcher():
+    """A function job_url -> details dict, using JobSpy's own ZipRecruiter page parser."""
+    from jobspy.model import DescriptionFormat, ScraperInput
+    from jobspy.util import TLSRotating, create_session
+    from jobspy.ziprecruiter import ZipRecruiter
+    zr = ZipRecruiter()
+    zr.scraper_input = ScraperInput(fetch_description=True, description_format=DescriptionFormat.MARKDOWN)
+    zr.session = create_session(TLSRotating(None), zr.scraper_input)
+    zr.session.impersonate = "safari"
+    zr.warn = lambda msg: None            # failures show up as an empty result
+    return lambda job: zr._fetch_details(job.get("id"), job["job_url"])
+
+
+def fill_zip_descriptions(jobs: list[dict], log=print, fetch=None, sleep=time.sleep) -> dict:
+    """Fetch missing descriptions for these ZipRecruiter listings, a few seconds apart,
+    backing off when ZipRecruiter refuses and stopping after ZIP_MAX_FAILURES refusals
+    in a row. Updates the listings in place. Returns {"tried", "fetched", "stopped_early"}."""
+    jobs = jobs[:ZIP_MAX_FETCHES]
+    stats = {"tried": 0, "fetched": 0, "stopped_early": False}
+    if not jobs:
+        return stats
+    fetch = fetch or _zip_fetcher()
+    log(f"Fetching {len(jobs)} missing ZipRecruiter description(s), a few seconds apart...")
+    streak = 0
+    for i, job in enumerate(jobs):
+        if i:
+            sleep(random.uniform(*ZIP_PAUSE))
+        stats["tried"] += 1
+        try:
+            details = fetch(job) or {}
+        except Exception:
+            details = {}
+        if details.get("description"):
+            for k, v in details.items():
+                if v is not None and not job.get(k):
+                    job[k] = v
+            stats["fetched"] += 1
+            streak = 0
+            continue
+        streak += 1
+        if streak >= ZIP_MAX_FAILURES:
+            stats["stopped_early"] = True
+            log(f"  ! ZipRecruiter kept refusing; stopped after {stats['tried']} (run `jobs.py descriptions` later)")
+            break
+        sleep(ZIP_BACKOFF * streak)
+    log(f"  got {stats['fetched']} of {stats['tried']} ZipRecruiter description(s)")
+    return stats
+
+
+def backfill_zip_descriptions(use_ai=True, trigger="cli", log=print) -> dict:
+    """Fetch descriptions for ZipRecruiter roles already in the tracker that have none
+    (not archived), then AI-screen the ones that only now have something to go on
+    (not screened or "unknown", or marked Not a fit by the AI). Raises db.RunInProgress
+    if a pull or re-screen is running."""
+    with db.run_lock():
+        conn = db.connect()
+        try:
+            rows = conn.execute(
+                "SELECT id, job_url FROM roles WHERE site='zip_recruiter' AND job_url IS NOT NULL "
+                "AND (description IS NULL OR TRIM(description)='') AND COALESCE(archived,0)=0 "
+                "ORDER BY id DESC").fetchall()
+            listings = [{"role_id": r["id"], "id": f"role {r['id']}", "job_url": r["job_url"]} for r in rows]
+            stats = fill_zip_descriptions(listings, log)
+            got = []
+            for job in listings:
+                if job.get("description"):
+                    rec = {k: v for k, v in job.items() if k in db.ROLE_FIELDS}
+                    if "description" in db.fill_blanks(conn, job["role_id"], rec):
+                        got.append(job["role_id"])
+            conn.commit()
+            to_screen, restore = [], set()
+            for rid in got:
+                r = conn.execute("SELECT status, ai_match FROM roles WHERE id=?", (rid,)).fetchone()
+                if r["status"] == "not_applied" and r["ai_match"] in (None, "unknown"):
+                    to_screen.append(rid)
+                elif db.last_change_by_ai(conn, rid):
+                    to_screen.append(rid)
+                    restore.add(rid)
+            ai = None
+            if use_ai and to_screen:
+                import ai_screen
+                run_id = db.start_run(conn, kind="rescreen", trigger=trigger)
+                ai = ai_screen.screen_roles(conn, to_screen, log=log, restore_ids=restore, run_id=run_id)
+                db.finish_run(conn, run_id, status="ok" if not ai["errors"] else "partial",
+                              ai_screened=ai["screened"], ai_rejected=ai["rejected"], ai_unsure=ai["unsure"],
+                              ai_input_tokens=ai["input_tokens"], ai_output_tokens=ai["output_tokens"],
+                              ai_cost=ai["cost"])
+            return {"missing": len(listings), **stats, "described": got, "ai": ai}
+        finally:
+            conn.close()
 
 
 # ----------------------------------------------------------------------------
@@ -368,6 +474,29 @@ def _run(reuse, ignore_seen, use_ai, trigger, log) -> dict:
                 f"{len(prefs['locations']['value']) + bool(prefs['locations'].get('include_remote'))} "
                 f"location(s) on {', '.join(prefs['sites'])}")
             jobs = fetch_jobs(prefs, log, fetch_stats)
+
+        # ZipRecruiter listings that came back without a description (see
+        # fill_zip_descriptions): fetch them again, slowly, but only the ones we'd keep:
+        # new listings that pass the filters, or roles we already have with no description,
+        # and not when another board's copy of the same posting has a description.
+        described = {(db._norm(j.get("title")), db.company_core(j.get("company")))
+                     for j in jobs if (j.get("description") or "").strip()}
+        need_zip = []
+        for job in jobs:
+            if (job.get("site") != "zip_recruiter" or (job.get("description") or "").strip()
+                    or not job.get("job_url")
+                    or (db._norm(job.get("title")), db.company_core(job.get("company"))) in described):
+                continue
+            existing = db.find_existing(conn, job.get("title"), job.get("company"), job.get("job_url"),
+                                        location=job.get("location"), job_url_direct=job.get("job_url_direct"))
+            if existing is not None:
+                if not existing["description"]:
+                    need_zip.append(job)
+            elif (ignore_seen or not db.is_seen(conn, job.get("job_url") or job.get("id"))) \
+                    and evaluate(job, today, prefs)[0]:
+                need_zip.append(job)
+        zip_stats = fill_zip_descriptions(need_zip, log)
+        if not reuse:
             raw_file.write_text(json.dumps(jobs, default=str), encoding="utf-8")
 
         # Each posting is filtered on its own, so a role listed in several cities
@@ -434,7 +563,8 @@ def _run(reuse, ignore_seen, use_ai, trigger, log) -> dict:
             sites[job.get("site") or "unknown"] = sites.get(job.get("site") or "unknown", 0) + 1
         result.update(scraped=len(jobs), kept=len(kept), added=len(new_ids), rejected=rejected,
                       sites=sites, details_filled=len(filled_ids), descriptions_added=len(described),
-                      searches=fetch_stats.get("searches", 0), failed_searches=fetch_stats.get("failed", []))
+                      searches=fetch_stats.get("searches", 0), failed_searches=fetch_stats.get("failed", []),
+                      zip_descriptions=zip_stats)
 
         ai = {"screened": 0, "rejected": 0, "unsure": 0, "input_tokens": 0,
               "output_tokens": 0, "cost": 0.0, "errors": 0, "skipped": None}

@@ -118,7 +118,7 @@ Then create `.env` and run `service.ps1 install`.
   - **Dates:** when the role was posted, and when it was added to the tracker.
   - **Source:** the job board it came from, or added by you.
   - **More:** has a step to do (a screen or interview still to do), and include archived roles.
-  - **The address bar keeps your view:** the search, filters, sort and page are in the URL, for example `http://localhost:5055/#/?q=machine%20learning&fit=strong,good&remote=1`. Bookmark it, share it or reload; opening a link like that applies its filters.
+  - **The address bar keeps your view:** the search, filters, sort and page are in the URL, for example `http://localhost:5055/#/?q=machine%20learning&fit=strong,good&remote=1`. Bookmark it, share it or reload; opening a link like that applies its filters. The role you have open is in it too (`role=69`), so a refresh reopens it.
 - **Click a role** to open its details:
   - set the status with one click
   - set the applied date
@@ -230,6 +230,7 @@ Each listing is filtered on its own, so a role posted in several cities is kept 
 They use a temporary database, so `jobs.db` is never touched.
 
 ## Limitations
+- ZipRecruiter refuses rapid requests: the scraper gets about 20 job pages in a row before it's blocked, so later listings arrive without a description. Each pull fetches those again, a few seconds apart, for listings that pass your filters (up to 50 per pull, stopping if ZipRecruiter keeps refusing); `jobs.py descriptions` does the same for ZipRecruiter roles you already have.
 - LinkedIn sometimes rate-limits scraping ("429" errors). Those postings come in without a description: open the posting and paste it into the role with **+ Add description**.
 - Experience and pay are read from description text, so check each posting before applying.
 - Scraping is against LinkedIn's terms of service. One run a day is a reasonable pace.

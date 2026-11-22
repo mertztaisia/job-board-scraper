@@ -46,7 +46,7 @@
   }
   function stateFromUrl() {
     const p = hashParams();
-    if (![...p.keys()].length) return false;
+    if (!URL_KEYS.some(([, name]) => p.has(name))) return false;
     Object.assign(state, structuredClone(URL_DEFAULTS));
     for (const [key, name, kind] of URL_KEYS) {
       if (!p.has(name)) continue;
@@ -68,6 +68,7 @@
       else if (v !== URL_DEFAULTS[key] && v !== "" && v != null) out = encodeURIComponent(String(v));
       if (out != null) parts.push(`${name}=${out}`);
     }
+    if (selectedId) parts.push(`role=${selectedId}`);   // the open role, so a refresh reopens it
     return "#/" + (parts.length ? "?" + parts.join("&") : "");
   }
   // Keep the address bar in step with the roles view, without adding a history entry per click.
@@ -423,7 +424,16 @@
     saveNotesNow();
     selectedId = id;
     $$("#rows tr").forEach((tr) => tr.classList.toggle("selected", +tr.dataset.id === id));
-    current = await api(`/api/roles/${id}`);
+    syncUrl();
+    try {
+      current = await api(`/api/roles/${id}`);
+    } catch (e) {   // e.g. a ?role= link to a role that was merged or no longer exists
+      if (selectedId === id) { selectedId = null; syncUrl(); }
+      $$("#rows tr.selected").forEach((tr) => tr.classList.remove("selected"));
+      toast(e.status === 404 ? "That role no longer exists." : e.message, "error");
+      return;
+    }
+    if (selectedId !== id) return;   // another role was opened meanwhile
     renderDrawer();
     $("#drawer").classList.add("open");
     $("#drawer").setAttribute("aria-hidden", "false");
@@ -435,6 +445,13 @@
     $("#drawer").setAttribute("aria-hidden", "true");
     selectedId = null; current = null;
     $$("#rows tr.selected").forEach((tr) => tr.classList.remove("selected"));
+    syncUrl();
+  }
+
+  // The role named in the URL (?role=ID), e.g. after a refresh: open it.
+  function openRoleFromUrl() {
+    const id = parseInt(hashParams().get("role"), 10);
+    if (id && id !== selectedId) openRole(id);
   }
 
   function resumeOptions(selected) {
@@ -1224,6 +1241,8 @@
             + `${r.descriptions_added ? ` (${n(r.descriptions_added)} got a description)` : ""}</div>` : ""}</dd>
           <dt>Filtered out</dt><dd>${n(filteredTotal)}${filtered.length ? `<div class="cell-dim">${filtered.slice(0, 5)
             .map(([k, v]) => `${esc(k)}: ${n(v)}`).join("<br>")}${filtered.length > 5 ? "<br>…" : ""}</div>` : ""}</dd>
+          ${r.zip_descriptions && r.zip_descriptions.tried ? `<dt>ZipRecruiter descriptions</dt><dd>${n(r.zip_descriptions.fetched)} of ${n(r.zip_descriptions.tried)} fetched${
+            r.zip_descriptions.stopped_early ? '<div class="cell-dim">ZipRecruiter kept refusing, so it stopped early. Run <code>jobs.py descriptions</code> later for the rest.</div>' : ""}</dd>` : ""}
           <dt>Passed filters</dt><dd>${n(r.kept)}</dd>
           <dt>AI screen</dt><dd>${aiLine}</dd>
         </dl>
@@ -1857,6 +1876,7 @@
       // A URL with filters (pasted, bookmarked, back/forward) sets them; a bare #/ keeps the current ones.
       if (stateFromUrl()) $("#q").value = state.q;
       load();
+      openRoleFromUrl();
     }
   }
 

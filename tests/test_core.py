@@ -915,5 +915,50 @@ class AutoArchiveTests(TempDB):
         self.assertTrue(self.archived(rid))
 
 
+class ZipRecruiterDescriptionTests(TempDB):
+    """Missing ZipRecruiter descriptions are fetched again, slowly (no network here)."""
+
+    def test_paced_and_gives_up_after_repeated_refusals(self):
+        sleeps, answers = [], iter([{"description": "one"}, {}, {"description": "three"}, {}, {}, {}, {"description": "never"}])
+        jobs = [{"job_url": f"https://zip/{i}"} for i in range(7)]
+        st = daily_jobs.fill_zip_descriptions(jobs, log=lambda *_: None, fetch=lambda j: next(answers), sleep=sleeps.append)
+        self.assertEqual(st, {"tried": 6, "fetched": 2, "stopped_early": True})
+        self.assertEqual([j.get("description") for j in jobs[:3]], ["one", None, "three"])
+        self.assertIsNone(jobs[6].get("description"))
+        self.assertTrue(all(x >= daily_jobs.ZIP_PAUSE[0] for x in sleeps))         # never back to back
+        self.assertIn(daily_jobs.ZIP_BACKOFF * 2, sleeps)                           # waits longer after refusals
+
+    def test_pull_fetches_only_listings_it_would_keep(self):
+        fetched = []
+        saved = daily_jobs._zip_fetcher
+        daily_jobs._zip_fetcher = lambda: (lambda j: fetched.append(j["job_url"]) or {"description": "Full text. 2+ years of experience."})
+        daily_jobs.ZIP_PAUSE, pause = (0, 0), daily_jobs.ZIP_PAUSE
+        try:
+            res = run_pull([
+                job(site="zip_recruiter", job_url="https://zip/keep", description=None),
+                job(site="zip_recruiter", job_url="https://zip/senior", title="Senior Software Engineer", description=None),
+                job(site="zip_recruiter", job_url="https://zip/dup", title="Backend Engineer", company="Initech", description=None),
+                job(site="linkedin", job_url="https://li/dup", title="Backend Engineer", company="Initech")])
+        finally:
+            daily_jobs._zip_fetcher, daily_jobs.ZIP_PAUSE = saved, pause
+        self.assertEqual(fetched, ["https://zip/keep"])        # not the filtered-out one, not the one LinkedIn covered
+        self.assertEqual(res["zip_descriptions"]["fetched"], 1)
+        d = self.conn.execute("SELECT description FROM roles WHERE job_url='https://zip/keep'").fetchone()[0]
+        self.assertEqual(d, "Full text. 2+ years of experience.")
+
+    def test_backfill_existing_roles(self):
+        rid, _ = db.upsert_role(self.conn, job(site="zip_recruiter", job_url="https://zip/old", description=None))
+        self.conn.commit()
+        saved, pause = daily_jobs._zip_fetcher, daily_jobs.ZIP_PAUSE
+        daily_jobs._zip_fetcher = lambda: (lambda j: {"description": "Backfilled"})
+        daily_jobs.ZIP_PAUSE = (0, 0)
+        try:
+            r = daily_jobs.backfill_zip_descriptions(use_ai=False, log=lambda *_: None)
+        finally:
+            daily_jobs._zip_fetcher, daily_jobs.ZIP_PAUSE = saved, pause
+        self.assertEqual((r["missing"], r["described"]), (1, [rid]))
+        self.assertEqual(db.get_role(self.conn, rid)["description"], "Backfilled")
+
+
 if __name__ == "__main__":
     unittest.main()
