@@ -111,7 +111,7 @@ Then create `.env` and run `service.ps1 install`.
 - **Search** by title, company, location, description or notes. Press `/` to jump to the search box.
 - **Filters** are in the left sidebar, in groups that collapse (click a heading; which are open is remembered). A badge on a group shows how many of its filters are on, and **Reset filters** clears them all and collapses every group.
   - **Status:** click one to show only that status; once one is selected, clicking others adds them.
-  - **Location:** remote only, and places: type a city or state and press Enter, or click one of your most common cities. Matching is by whole word, any case ("CA" matches "San Jose, CA" but not "Chicago"); several places show roles in any of them.
+  - **Location:** a **Remote** chip, and places: type a city or state and press Enter, or click any city from your roles (most common first, including the city a remote listing names; **+N more** shows the rest). Matching is by whole word, any case ("CA" matches "San Jose, CA" but not "Chicago"); several places show roles in any of them.
   - **AI fit:** Strong, Good, Partial, Weak, Not a fit, Unknown or Not screened.
   - **Interests:** roles tagged with your interests.
   - **Role details:** pay listed, has a description, pays up to at least $X, and years required at most N (roles that don't say are kept).
@@ -142,7 +142,7 @@ Then create `.env` and run `service.ps1 install`.
   - A step starts as **To do** (with an optional date or deadline). **Mark done** moves it to "done, waiting to hear back"; then set Passed or Rejected. Passing offers to add the next step.
   - The Status column shows the current step: the next one still to do, soonest first, e.g. "Tech screen · to do · Nov 25" (orange; red once the date has passed), otherwise the latest step, e.g. "Tech screen · waiting". For an offer it shows the response deadline.
 - **The role panel** also has Offer and Questions & answers cards.
-- **Archive** (button in the role panel) hides a role from the list, search and counts. Turn on **Include archived** in the sidebar to see archived roles again. It turns itself off on every reload, and archived roles aren't loaded at all until you turn it on.
+- **Archive** (button in the role panel) hides a role from the list, search and counts. Roles that have been **Not a fit** for 7 days are archived automatically; change the number of days or turn it off in Preferences → Archiving. A role you unarchive yourself stays unarchived. Turn on **Include archived** in the sidebar to see archived roles again. It turns itself off on every reload, and archived roles aren't loaded at all until you turn it on.
 - **Keys:** `j` / `k` move to the next or previous role. `Esc` closes the panel.
 - **Add role** is for jobs you found yourself. It warns you if you already have a role at that company.
 - **Theme:** the half-moon button switches between light and dark.

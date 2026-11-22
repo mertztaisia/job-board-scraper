@@ -87,6 +87,8 @@ DEFAULT_PREFS = {
     "interests": [],
     "prompt": "",
     "ai": {"enabled": True, "model": "claude-haiku-5-5", "unsure_action": "keep"},
+    # Roles that have been "Not a fit" for this many days are archived (hidden) automatically.
+    "auto_archive": {"enabled": True, "days": 7},
 }
 
 SCHEMA = """
@@ -587,6 +589,9 @@ def validate_prefs(p: dict) -> list[str]:
                        ("industries", "Industries"), ("company_size", "Company size")):
         str_list((p.get(key) or {}).get("value"), label)
     str_list(p.get("interests"), "Interests")
+    if not isinstance((p.get("auto_archive") or {}).get("enabled", True), bool):
+        errors.append("“Archive Not a fit roles automatically” must be on or off.")
+    num("auto_archive.days", "Days before archiving Not a fit roles", 1, 365)
     if (p.get("ai") or {}).get("model") not in AI_MODELS:
         errors.append(f"Unknown AI model. Use one of: {', '.join(sorted(AI_MODELS))}.")
     return errors
@@ -1218,20 +1223,31 @@ def list_roles(conn, q="", statuses=None, remote=False, paid=False, tags=None,
 # ----------------------------------------------------------------------------
 # Archive
 # ----------------------------------------------------------------------------
-def common_places(conn, limit=8) -> list[str]:
-    """The cities your (non-archived) roles are in most often, for quick location filters.
-    Remote listings aren't counted: the Remote only switch covers them."""
+_COUNTRY_ONLY = {"usa", "us", "united states", "u.s.", "anywhere"}
+
+
+def common_places(conn, limit: int | None = None) -> list[dict]:
+    """Every city your (non-archived) roles are in, most common first, as
+    [{"name": "New York", "count": 44}, ...], for the sidebar's location filter.
+    Remote listings count under the city they name ("Remote (Dallas, TX, USA)" -> Dallas);
+    a plain "Remote" or "Remote (USA)" has no city (the Remote chip covers those)."""
     counts: dict[str, int] = {}
     names: dict[str, str] = {}          # lower-case key -> first spelling seen
     for (loc,) in conn.execute("SELECT location FROM roles WHERE COALESCE(archived,0)=0 AND location IS NOT NULL"):
+        text = loc.strip()
+        if text.lower().startswith("remote"):
+            inner = re.search(r"\((.*)\)", text)
+            text = inner.group(1).strip() if inner else ""
+            if text.lower() in _COUNTRY_ONLY:
+                text = ""
         # "New York, NY" and the typo'd "New York. NY" are both "New York"
-        city = re.split(r",|\.\s", loc)[0].strip().rstrip(".")
-        if city and not city.lower().startswith("remote"):
+        city = re.split(r",|\.\s", text)[0].strip().rstrip(".")
+        if city:
             key = city.lower()
             names.setdefault(key, city)
             counts[key] = counts.get(key, 0) + 1
-    top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
-    return [names[k] for k, _ in top]
+    top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [{"name": names[k], "count": n} for k, n in (top[:limit] if limit else top)]
 
 
 def set_archived(conn, role_id: int, archived: bool):
@@ -1242,6 +1258,39 @@ def set_archived(conn, role_id: int, archived: bool):
                  (1 if archived else 0, now_iso() if archived else None, now_iso(), role_id))
     add_history(conn, role_id, row["status"], "Archived" if archived else "Unarchived")
     return get_role(conn, role_id)
+
+
+def auto_archive_not_a_fit(conn, prefs: dict | None = None) -> int:
+    """Archive roles that have been Not a fit for at least the number of days in
+    Preferences → Archiving (counted from when they last became Not a fit). A role you
+    unarchived yourself after that is left alone. Returns how many were archived."""
+    rule = (prefs or get_prefs(conn)).get("auto_archive") or {}
+    if not rule.get("enabled", True) or not rule.get("days"):
+        return 0
+    cutoff = (dt.datetime.now() - dt.timedelta(days=int(rule["days"]))).isoformat(timespec="seconds")
+    # "since": when it last became Not a fit = its first Not a fit history entry after the
+    # last entry with any other status (later notes on a Not a fit role don't reset it).
+    rows = conn.execute(
+        "SELECT r.id, (SELECT MIN(h.at) FROM status_history h WHERE h.role_id=r.id AND h.status='not_a_fit' "
+        "  AND h.at > COALESCE((SELECT MAX(o.at) FROM status_history o "
+        "                       WHERE o.role_id=r.id AND o.status != 'not_a_fit'), '')) AS since "
+        "FROM roles r WHERE r.status='not_a_fit' AND COALESCE(r.archived,0)=0").fetchall()
+    n = 0
+    for r in rows:
+        since = r["since"]
+        if not since or since > cutoff:
+            continue
+        unarchived_later = conn.execute(
+            "SELECT 1 FROM status_history WHERE role_id=? AND note='Unarchived' AND at >= ?",
+            (r["id"], since)).fetchone()
+        if unarchived_later:
+            continue
+        conn.execute("UPDATE roles SET archived=1, archived_at=?, updated_at=? WHERE id=?",
+                     (now_iso(), now_iso(), r["id"]))
+        add_history(conn, r["id"], "not_a_fit",
+                    f"Archived automatically: Not a fit for {int(rule['days'])}+ days")
+        n += 1
+    return n
 
 
 # ----------------------------------------------------------------------------

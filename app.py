@@ -401,9 +401,10 @@ def put_preferences():
     try:
         with conn() as c:
             prefs = db.save_prefs(c, data)
+            archived = db.auto_archive_not_a_fit(c, prefs)   # a shorter period applies right away
     except ValueError as e:
         return jsonify(error=str(e)), 400
-    return jsonify(prefs=prefs)
+    return jsonify(prefs=prefs, auto_archived=archived)
 
 
 @app.get("/api/insights")

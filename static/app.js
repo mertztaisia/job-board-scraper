@@ -259,13 +259,21 @@
     $("#siteFilter").innerHTML = sites.length
       ? sites.map((s) => `<button class="chip ${state.sites.includes(s) ? "on" : ""}" data-site="${esc(s)}">${esc(SITE_LABELS[s] || s)}</button>`).join("")
       : '<span class="empty-note">No roles yet.</span>';
-    // Location: places you've picked (click to remove), then your most common cities to add.
+    // Location: the Remote chip, places you've picked (click to remove), then every city in
+    // your roles, most common first (the first few, then "+N more").
     const picked = new Set(state.locs.map((l) => l.toLowerCase()));
-    const suggestions = (META.places || []).filter((c) => !picked.has(c.toLowerCase()));
+    const suggestions = (META.places || []).filter((c) => !picked.has(c.name.toLowerCase()));
+    const shown = showAllPlaces ? suggestions : suggestions.slice(0, PLACES_SHOWN);
+    const more = suggestions.length - shown.length;
     $("#locFilter").innerHTML =
-      state.locs.map((l) => `<button class="chip on" data-loc-rm="${esc(l)}" title="Remove">${esc(l)}<span class="chip-x">×</span></button>`).join("")
-      + suggestions.map((c) => `<button class="chip add" data-loc-add="${esc(c)}">${esc(c)}</button>`).join("");
+      `<button class="chip ${state.remote ? "on" : ""}" data-remote title="Remote roles only">Remote</button>`
+      + state.locs.map((l) => `<button class="chip on" data-loc-rm="${esc(l)}" title="Remove">${esc(l)}<span class="chip-x">×</span></button>`).join("")
+      + shown.map((c) => `<button class="chip add" data-loc-add="${esc(c.name)}" title="${c.count} role${c.count === 1 ? "" : "s"}">${esc(c.name)}</button>`).join("")
+      + (more > 0 ? `<button class="chip" data-places-more>+${more} more</button>`
+        : showAllPlaces && suggestions.length > PLACES_SHOWN ? `<button class="chip" data-places-more>Show fewer</button>` : "");
   }
+  const PLACES_SHOWN = 8;
+  let showAllPlaces = false;
 
   // Badge on each collapsible group: how many of its filters are on.
   function renderFilterBadges() {
@@ -297,7 +305,6 @@
   }
 
   function syncFilterControls() {
-    $("#fRemote").checked = state.remote;
     $("#fPaid").checked = state.paid;
     $("#fArchived").checked = state.archived;
     $$("#fAdded button").forEach((b) => b.classList.toggle("on", b.dataset.v === state.added));
@@ -1411,6 +1418,15 @@
         <div style="padding:16px 18px"><label class="field"><textarea rows="5" data-text="prompt" placeholder="Describe the role you want…">${esc(p.prompt || "")}</textarea></label></div>
       </div>
 
+      <div class="pcard">
+        <div class="pcard-head"><div class="pcard-title">Archiving</div>
+          <div class="pcard-desc">Archived roles are hidden from the list, search and counts. Turn on “Include archived” in the sidebar to see them again.</div></div>
+        ${row("Archive Not a fit roles", "Counted from when a role became Not a fit. A role you unarchive yourself stays unarchived.",
+          `<label class="switch" style="padding-left:0"><input type="checkbox" data-bool="auto_archive.enabled" ${p.auto_archive.enabled ? "checked" : ""}><span class="track"></span><span>Archive them automatically</span></label>
+           <div class="inline"><label class="field" style="max-width:120px"><span>After (days)</span>
+             <input type="number" min="1" max="365" data-num="auto_archive.days" value="${p.auto_archive.days ?? ""}" ${p.auto_archive.enabled ? "" : "disabled"}></label></div>`)}
+      </div>
+
       <div class="pcard" id="aiCard">
         <div class="pcard-head"><div class="pcard-title">AI screening</div>
           <div class="pcard-desc">Runs after each pull, on new roles only. Every run's token usage and cost is logged below.</div></div>
@@ -1540,7 +1556,11 @@
       $$("button", g).forEach((x) => { const sel = (x.dataset.v === "1") === on; x.classList.toggle("on", sel); x.classList.toggle("must", sel && on); });
       updateDirty();
     });
-    $$("[data-bool]", root).forEach((c) => c.onchange = () => { setPath(c.dataset.bool, c.checked); updateDirty(); });
+    $$("[data-bool]", root).forEach((c) => c.onchange = () => {
+      setPath(c.dataset.bool, c.checked);
+      if (c.dataset.bool === "auto_archive.enabled") renderPrefsKeepScroll();   // enables/disables the days box
+      else updateDirty();
+    });
     // A switch whose "on" means the setting is false (e.g. "Limit results" on = results_all off);
     // redraws so the warning and the disabled number box follow it.
     $$("[data-invbool]", root).forEach((c) => c.onchange = () => { setPath(c.dataset.invbool, !c.checked); renderPrefsKeepScroll(); });
@@ -1581,7 +1601,8 @@
       const d = await api("/api/preferences", { method: "PUT", body: prefs });
       prefs = d.prefs; savedPrefs = clone(prefs);
       META = await api("/api/meta");
-      toast("Preferences saved. They apply to the next pull.", "success");
+      toast("Preferences saved. They apply to the next pull."
+        + (d.auto_archived ? ` Archived ${d.auto_archived} Not a fit role${d.auto_archived === 1 ? "" : "s"}.` : ""), "success");
       renderPrefsKeepScroll();
     } catch (e) { toast(e.message, "error"); }
   }
@@ -1864,7 +1885,7 @@
     $("#stageForm").onsubmit = (e) => { e.preventDefault(); submitStage(false); };
     $("#stageSkip").onclick = () => submitStage(true);
     $$("#stageDialog [data-sclose]").forEach((b) => b.onclick = () => $("#stageDialog").classList.add("hidden"));
-    for (const [id, key] of [["#fRemote", "remote"], ["#fPaid", "paid"], ["#fArchived", "archived"],
+    for (const [id, key] of [["#fPaid", "paid"], ["#fArchived", "archived"],
       ["#fDescribed", "described"], ["#fTodo", "todo"]])
       $(id).addEventListener("change", (e) => { state[key] = e.target.checked; refilter(); });
     $("#fAdded").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; state.added = b.dataset.v; refilter(); });
@@ -1885,6 +1906,8 @@
       const add = e.target.closest("[data-loc-add]"), rm = e.target.closest("[data-loc-rm]");
       if (add) addLoc(add.dataset.locAdd);
       if (rm) { state.locs = state.locs.filter((l) => l !== rm.dataset.locRm); refilter(); }
+      if (e.target.closest("[data-remote]")) { state.remote = !state.remote; refilter(); }
+      if (e.target.closest("[data-places-more]")) { showAllPlaces = !showAllPlaces; renderChipFilters(); }
     });
     $("#clearFilters").onclick = () => {
       Object.assign(state, structuredClone(FILTER_DEFAULTS), { archived: false, sort: "status", order: "asc" });

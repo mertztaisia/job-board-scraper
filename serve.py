@@ -39,7 +39,8 @@ def setup_logging():
 
 
 def backup_loop(log):
-    """Back up the database once a day while the server runs (see settings.BACKUP_DIR)."""
+    """Hourly housekeeping while the server runs: the daily backup (see
+    settings.BACKUP_DIR) and archiving roles that have been Not a fit long enough."""
     import db
     while True:
         try:
@@ -48,6 +49,17 @@ def backup_loop(log):
                 log.info("Daily backup: %s", path)
         except Exception:
             log.exception("Daily backup failed")
+        try:
+            conn = db.connect()
+            try:
+                n = db.auto_archive_not_a_fit(conn)
+                conn.commit()
+            finally:
+                conn.close()
+            if n:
+                log.info("Archived %d Not a fit role(s) automatically", n)
+        except Exception:
+            log.exception("Auto-archive failed")
         time.sleep(3600)
 
 

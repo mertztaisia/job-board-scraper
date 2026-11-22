@@ -761,11 +761,16 @@ class SidebarFilterTests(TempDB):
         db.update_role(self.conn, self.ids["b"], {"location": "San Francisco, CA"})
         db.update_role(self.conn, self.ids["c"], {"location": "Brooklyn. NY"})
         self.conn.commit()
-        self.assertEqual(db.common_places(self.conn)[0], "Brooklyn")   # "Brooklyn. NY" counts as Brooklyn
+        self.assertEqual(db.common_places(self.conn)[0], {"name": "Brooklyn", "count": 2})   # "Brooklyn. NY" too
         db.update_role(self.conn, self.ids["c"], {"location": "Remote (Austin, TX)"})
         self.conn.commit()
-        self.assertEqual(db.common_places(self.conn), ["Brooklyn", "San Francisco"])   # remote not listed
-        self.assertEqual(self.client.get("/api/meta").get_json()["places"], ["Brooklyn", "San Francisco"])
+        # every city, incl. the one a remote listing names ("Remote (Austin, TX)" -> Austin)
+        names = lambda places: [x["name"] for x in places]
+        self.assertEqual(names(db.common_places(self.conn)), ["Austin", "Brooklyn", "San Francisco"])
+        self.assertEqual(names(self.client.get("/api/meta").get_json()["places"]), ["Austin", "Brooklyn", "San Francisco"])
+        db.update_role(self.conn, self.ids["c"], {"location": "Remote (USA)"})   # no city: not listed
+        self.conn.commit()
+        self.assertEqual(names(db.common_places(self.conn)), ["Brooklyn", "San Francisco"])
 
 
 class NoLimitTests(TempDB):
@@ -850,6 +855,54 @@ class CompanyNameDuplicateTests(TempDB):
         self.assertIn("Merged duplicate role(s)", merged["history"][0]["note"])
         self.assertTrue(db.is_seen(self.conn, "https://li/1"))
         self.assertEqual(db.find_duplicate_groups(self.conn), [])
+
+
+class AutoArchiveTests(TempDB):
+    def not_a_fit_days_ago(self, days, **kw):
+        rid, _ = db.upsert_role(self.conn, job(job_url=f"https://example.com/{days}-{len(kw)}", **kw))
+        db.update_role(self.conn, rid, {"status": "not_a_fit"}, note="not for me")
+        # backdate its whole history: added the day before, Not a fit `days` ago
+        when = lambda d: (dt.datetime.now() - dt.timedelta(days=d)).isoformat(timespec="seconds")
+        self.conn.execute("UPDATE status_history SET at=? WHERE role_id=? AND status!='not_a_fit'", (when(days + 1), rid))
+        self.conn.execute("UPDATE status_history SET at=? WHERE role_id=? AND status='not_a_fit'", (when(days), rid))
+        self.conn.commit()
+        return rid
+
+    def archived(self, rid):
+        return bool(self.conn.execute("SELECT archived FROM roles WHERE id=?", (rid,)).fetchone()[0])
+
+    def test_default_is_7_days(self):
+        self.assertEqual(db.DEFAULT_PREFS["auto_archive"], {"enabled": True, "days": 7})
+        old = self.not_a_fit_days_ago(8, title="Old Engineer")
+        new = self.not_a_fit_days_ago(3, title="New Engineer")
+        self.assertEqual(db.auto_archive_not_a_fit(self.conn), 1)
+        self.assertTrue(self.archived(old))
+        self.assertFalse(self.archived(new))
+        self.assertIn("Archived automatically", db.get_role(self.conn, old)["history"][0]["note"])
+
+    def test_later_notes_dont_reset_the_clock(self):
+        rid = self.not_a_fit_days_ago(10)
+        db.update_role(self.conn, rid, {}, note="a note added today")
+        self.assertEqual(db.auto_archive_not_a_fit(self.conn), 1)
+
+    def test_unarchived_by_you_stays_unarchived(self):
+        rid = self.not_a_fit_days_ago(10)
+        db.auto_archive_not_a_fit(self.conn)
+        db.set_archived(self.conn, rid, False)
+        self.assertEqual(db.auto_archive_not_a_fit(self.conn), 0)
+        self.assertFalse(self.archived(rid))
+
+    def test_off_and_validation(self):
+        rid = self.not_a_fit_days_ago(30)
+        off = db._deep_merge(self.prefs, {"auto_archive": {"enabled": False}})
+        self.assertEqual(db.auto_archive_not_a_fit(self.conn, off), 0)
+        self.assertTrue(db.validate_prefs(db._deep_merge(self.prefs, {"auto_archive": {"days": 0}})))
+        self.assertTrue(db.validate_prefs(db._deep_merge(self.prefs, {"auto_archive": {"days": None}})))
+        # saving a shorter period archives right away
+        import app
+        r = app.app.test_client().put("/api/preferences", json=db._deep_merge(self.prefs, {"auto_archive": {"days": 2}}))
+        self.assertEqual(r.get_json()["auto_archived"], 1)
+        self.assertTrue(self.archived(rid))
 
 
 if __name__ == "__main__":
