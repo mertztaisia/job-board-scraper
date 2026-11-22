@@ -1,0 +1,23 @@
+# Secrets
+.env
+
+# Personal data: your applications, notes, interview answers and scraped postings
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.run.lock
+results/
+seen_jobs.json*
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Logs
+run_log.txt
+logs/
+
+# Local editor/assistant config
+.claude/
