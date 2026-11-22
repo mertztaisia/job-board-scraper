@@ -148,6 +148,13 @@ a:hover { text-decoration: underline; }
   background: var(--surface-2); color: var(--text); font: 12px var(--font); padding: 0 6px;
 }
 .fgroup-link { display: inline-block; margin: 8px 8px 0; font-size: 12px; }
+.finput {
+  display: block; width: calc(100% - 16px); margin: 4px 8px 8px; height: 28px; padding: 0 8px;
+  border-radius: var(--radius); border: 1px solid var(--border-strong); background: var(--surface-2);
+  color: var(--text); font: 13px var(--font);
+}
+.finput:focus { outline: none; border-color: var(--blue3); }
+.chip .chip-x { margin-left: 4px; opacity: .7; }
 .sidebar-foot { margin-top: auto; padding: 12px 6px 0; font: 11px var(--mono); color: var(--text-3); word-break: break-all; }
 
 .status-list { list-style: none; margin: 0; padding: 0; }

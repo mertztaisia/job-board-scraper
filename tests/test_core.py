@@ -745,6 +745,28 @@ class SidebarFilterTests(TempDB):
         self.assertEqual(self.titles(todo="1"), ["B"])
         self.assertEqual(self.client.get("/api/roles", query_string={"min_pay": "lots"}).status_code, 400)
 
+    def test_location_filter_and_common_places(self):
+        db.update_role(self.conn, self.ids["a"], {"location": "Brooklyn, NY"})
+        db.update_role(self.conn, self.ids["b"], {"location": "San Francisco, CA"})
+        db.update_role(self.conn, self.ids["c"], {"location": "Remote (Austin, TX)"})
+        self.conn.commit()
+        self.assertEqual(self.titles(loc="brooklyn"), ["A"])                 # case-insensitive
+        self.assertEqual(self.titles(loc="Brooklyn|, CA"), ["A", "B"])       # any of several
+        self.assertEqual(self.titles(loc="Seattle"), [])
+        self.assertEqual(self.titles(loc="CA"), ["B"])              # whole word: state code
+        db.update_role(self.conn, self.ids["b"], {"location": "Chicago, IL"})
+        self.conn.commit()
+        self.assertEqual(self.titles(loc="CA"), [])                 # "CA" doesn't match "Chicago"
+        self.assertEqual(self.titles(loc="new york"), [])
+        db.update_role(self.conn, self.ids["b"], {"location": "San Francisco, CA"})
+        db.update_role(self.conn, self.ids["c"], {"location": "Brooklyn. NY"})
+        self.conn.commit()
+        self.assertEqual(db.common_places(self.conn)[0], "Brooklyn")   # "Brooklyn. NY" counts as Brooklyn
+        db.update_role(self.conn, self.ids["c"], {"location": "Remote (Austin, TX)"})
+        self.conn.commit()
+        self.assertEqual(db.common_places(self.conn), ["Brooklyn", "San Francisco"])   # remote not listed
+        self.assertEqual(self.client.get("/api/meta").get_json()["places"], ["Brooklyn", "San Francisco"])
+
 
 class NoLimitTests(TempDB):
     def test_no_limit_asks_boards_for_everything(self):

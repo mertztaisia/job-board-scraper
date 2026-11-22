@@ -109,14 +109,15 @@ Then create `.env` and run `service.ps1 install`.
   - **Details:** hover over a bar for its value, or click **Table** to see the numbers. All of it comes from `GET /api/insights`; targets are set with `PUT /api/targets`.
 - **Default sort:** Not applied first, then Interested, Interviewing, Offer, Applied, Rejected, Withdrawn and No longer accepting applications, with Not a fit last.
 - **Search** by title, company, location, description or notes. Press `/` to jump to the search box.
-- **Filters** are in the left sidebar, in groups that collapse (click a heading; which are open is remembered). A badge on a group shows how many of its filters are on, and **Reset filters** clears them all.
-  - **Status:** click one to show only that status; once one is selected, clicking others adds them. **Has a step to do** shows roles with a screen or interview still to do.
+- **Filters** are in the left sidebar, in groups that collapse (click a heading; which are open is remembered). A badge on a group shows how many of its filters are on, and **Reset filters** clears them all and collapses every group.
+  - **Status:** click one to show only that status; once one is selected, clicking others adds them.
+  - **Location:** remote only, and places: type a city or state and press Enter, or click one of your most common cities. Matching is by whole word, any case ("CA" matches "San Jose, CA" but not "Chicago"); several places show roles in any of them.
   - **AI fit:** Strong, Good, Partial, Weak, Not a fit, Unknown or Not screened.
   - **Interests:** roles tagged with your interests.
-  - **Role details:** remote only, pay listed, has a description, pays up to at least $X, and years required at most N (roles that don't say are kept).
+  - **Role details:** pay listed, has a description, pays up to at least $X, and years required at most N (roles that don't say are kept).
   - **Dates:** when the role was posted, and when it was added to the tracker.
   - **Source:** the job board it came from, or added by you.
-  - **More:** include archived roles.
+  - **More:** has a step to do (a screen or interview still to do), and include archived roles.
   - **The address bar keeps your view:** the search, filters, sort and page are in the URL, for example `http://localhost:5055/#/?q=machine%20learning&fit=strong,good&remote=1`. Bookmark it, share it or reload; opening a link like that applies its filters.
 - **Click a role** to open its details:
   - set the status with one click

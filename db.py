@@ -975,7 +975,7 @@ def list_roles(conn, q="", statuses=None, remote=False, paid=False, tags=None,
                added_since=None, sort="status", order="asc", include_archived=False,
                limit=None, offset=0, with_total=False, fits=None, min_pay=None,
                max_years=None, posted_since=None, sites=None, has_description=False,
-               step_todo=False):
+               step_todo=False, locations=None):
     """Filtered, sorted roles. limit/offset page through the results;
     with_total=True also returns how many roles match before paging.
 
@@ -985,7 +985,8 @@ def list_roles(conn, q="", statuses=None, remote=False, paid=False, tags=None,
     posted_since: date_posted on or after this ISO date.
     sites: job boards to keep ("manual" = roles you added yourself).
     has_description: only roles with a description.
-    step_todo: only roles with a step still to do."""
+    step_todo: only roles with a step still to do.
+    locations: place names ("Brooklyn", "CA"); a role matches if its location contains any of them."""
     # Archived roles are excluded at the SQL level unless asked for, so they are
     # never loaded, counted or searched in the default view.
     where, args = ([] if include_archived else ["COALESCE(archived, 0)=0"]), []
@@ -1037,6 +1038,11 @@ def list_roles(conn, q="", statuses=None, remote=False, paid=False, tags=None,
     if step_todo:
         where.append("EXISTS (SELECT 1 FROM interview_rounds ir WHERE ir.role_id=roles.id "
                      "AND ir.status='scheduled')")
+    locs = [l.strip() for l in (locations or []) if l and l.strip()]
+    if locs:
+        # Whole words, any case: "CA" matches "San Jose, CA" but not "Chicago".
+        where.append("(" + " OR ".join("location REGEXP ?" for _ in locs) + ")")
+        args += [r"\b" + re.escape(l).replace(r"\ ", r"[\s,.-]+") + r"\b" for l in locs]
     base_where = " AND ".join(where) or "1=1"
 
     counts = {k: 0 for k in STATUSES}
@@ -1076,6 +1082,22 @@ def list_roles(conn, q="", statuses=None, remote=False, paid=False, tags=None,
 # ----------------------------------------------------------------------------
 # Archive
 # ----------------------------------------------------------------------------
+def common_places(conn, limit=8) -> list[str]:
+    """The cities your (non-archived) roles are in most often, for quick location filters.
+    Remote listings aren't counted: the Remote only switch covers them."""
+    counts: dict[str, int] = {}
+    names: dict[str, str] = {}          # lower-case key -> first spelling seen
+    for (loc,) in conn.execute("SELECT location FROM roles WHERE COALESCE(archived,0)=0 AND location IS NOT NULL"):
+        # "New York, NY" and the typo'd "New York. NY" are both "New York"
+        city = re.split(r",|\.\s", loc)[0].strip().rstrip(".")
+        if city and not city.lower().startswith("remote"):
+            key = city.lower()
+            names.setdefault(key, city)
+            counts[key] = counts.get(key, 0) + 1
+    top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
+    return [names[k] for k, _ in top]
+
+
 def set_archived(conn, role_id: int, archived: bool):
     row = conn.execute("SELECT status FROM roles WHERE id=?", (role_id,)).fetchone()
     if not row:

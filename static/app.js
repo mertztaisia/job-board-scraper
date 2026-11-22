@@ -16,7 +16,7 @@
   let RESUMES = [];
   const FILTER_DEFAULTS = {
     statuses: [], tags: [], remote: false, paid: false, added: "",
-    fits: [], minPay: "", maxYears: "", posted: "", sites: [], described: false, todo: false,
+    fits: [], minPay: "", maxYears: "", posted: "", sites: [], described: false, todo: false, locs: [],
   };
   const state = Object.assign({ q: "", ...FILTER_DEFAULTS, sort: "status", order: "asc" },
     store.get("filters.v2", {}));
@@ -36,7 +36,7 @@
     ["q", "q", "text"], ["statuses", "status", "list"], ["fits", "fit", "list"], ["tags", "tags", "pipe"],
     ["remote", "remote", "flag"], ["paid", "paid", "flag"], ["described", "described", "flag"], ["todo", "todo", "flag"],
     ["minPay", "min_pay", "text"], ["maxYears", "max_years", "text"], ["posted", "posted", "text"], ["added", "added", "text"],
-    ["sites", "sites", "list"], ["archived", "archived", "flag"],
+    ["sites", "sites", "list"], ["locs", "loc", "pipe"], ["archived", "archived", "flag"],
     ["sort", "sort", "text"], ["order", "order", "text"], ["page", "page", "int"],
   ];
   const URL_DEFAULTS = { q: "", ...FILTER_DEFAULTS, archived: false, sort: "status", order: "asc", page: 1 };
@@ -259,18 +259,25 @@
     $("#siteFilter").innerHTML = sites.length
       ? sites.map((s) => `<button class="chip ${state.sites.includes(s) ? "on" : ""}" data-site="${esc(s)}">${esc(SITE_LABELS[s] || s)}</button>`).join("")
       : '<span class="empty-note">No roles yet.</span>';
+    // Location: places you've picked (click to remove), then your most common cities to add.
+    const picked = new Set(state.locs.map((l) => l.toLowerCase()));
+    const suggestions = (META.places || []).filter((c) => !picked.has(c.toLowerCase()));
+    $("#locFilter").innerHTML =
+      state.locs.map((l) => `<button class="chip on" data-loc-rm="${esc(l)}" title="Remove">${esc(l)}<span class="chip-x">×</span></button>`).join("")
+      + suggestions.map((c) => `<button class="chip add" data-loc-add="${esc(c)}">${esc(c)}</button>`).join("");
   }
 
   // Badge on each collapsible group: how many of its filters are on.
   function renderFilterBadges() {
     const counts = {
-      status: state.statuses.length + (state.todo ? 1 : 0),
+      status: state.statuses.length,
       fit: state.fits.length,
       interests: state.tags.length,
-      role: [state.remote, state.paid, state.described, state.minPay, state.maxYears].filter(Boolean).length,
+      location: (state.remote ? 1 : 0) + state.locs.length,
+      role: [state.paid, state.described, state.minPay, state.maxYears].filter(Boolean).length,
       dates: [state.posted, state.added].filter(Boolean).length,
       source: state.sites.length,
-      more: state.archived ? 1 : 0,
+      more: (state.archived ? 1 : 0) + (state.todo ? 1 : 0),
     };
     for (const [g, n] of Object.entries(counts)) {
       const b = $(`#badge-${g}`);
@@ -324,6 +331,7 @@
     if (state.sites.length) p.set("sites", state.sites.join(","));
     if (state.described) p.set("described", "1");
     if (state.todo) p.set("todo", "1");
+    if (state.locs.length) p.set("loc", state.locs.join("|"));
     p.set("limit", state.pageSize);
     p.set("offset", (state.page - 1) * state.pageSize);
     const data = await api("/api/roles?" + p);
@@ -1866,9 +1874,23 @@
     const toggleIn = (list, v) => (list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
     $("#fitFilter").addEventListener("click", (e) => { const b = e.target.closest("[data-fit]"); if (!b) return; state.fits = toggleIn(state.fits, b.dataset.fit); refilter(); });
     $("#siteFilter").addEventListener("click", (e) => { const b = e.target.closest("[data-site]"); if (!b) return; state.sites = toggleIn(state.sites, b.dataset.site); refilter(); });
+    const addLoc = (v) => {
+      v = (v || "").trim();
+      if (v && !state.locs.some((l) => l.toLowerCase() === v.toLowerCase())) { state.locs = [...state.locs, v]; refilter(); }
+    };
+    $("#fLocInput").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); addLoc(e.target.value); e.target.value = ""; }
+    });
+    $("#locFilter").addEventListener("click", (e) => {
+      const add = e.target.closest("[data-loc-add]"), rm = e.target.closest("[data-loc-rm]");
+      if (add) addLoc(add.dataset.locAdd);
+      if (rm) { state.locs = state.locs.filter((l) => l !== rm.dataset.locRm); refilter(); }
+    });
     $("#clearFilters").onclick = () => {
       Object.assign(state, structuredClone(FILTER_DEFAULTS), { archived: false, sort: "status", order: "asc" });
-      $("#q").value = ""; state.q = ""; refilter();
+      $("#q").value = ""; state.q = ""; $("#fLocInput").value = "";
+      $$(".fgroup").forEach((d) => { d.open = false; });   // collapse every group (remembered via "toggle")
+      refilter();
     };
     // Remember which filter groups are open.
     const openGroups = store.get("filterGroups", null);

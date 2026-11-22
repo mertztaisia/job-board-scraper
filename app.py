@@ -133,7 +133,13 @@ def meta():
                    round_kinds=db.ROUND_KINDS, round_statuses=db.ROUND_STATUSES,
                    match_levels=db.MATCH_LEVELS,
                    blocked_companies=prefs["companies_exclude"]["value"],
-                   sites=sorted(r["site"] for r in _sites_in_db()))
+                   sites=sorted(r["site"] for r in _sites_in_db()),
+                   places=_common_places())
+
+
+def _common_places():
+    with conn() as c:
+        return db.common_places(c)
 
 
 def _sites_in_db():
@@ -187,7 +193,8 @@ def roles():
             limit=limit, offset=offset, with_total=True,
             fits=[f for f in a.get("fit", "").split(",") if f], min_pay=min_pay, max_years=max_years,
             posted_since=posted_since, sites=[s for s in a.get("sites", "").split(",") if s],
-            has_description=a.get("described") == "1", step_todo=a.get("todo") == "1")
+            has_description=a.get("described") == "1", step_todo=a.get("todo") == "1",
+            locations=[l for l in a.get("loc", "").split("|") if l.strip()])
         total = c.execute("SELECT COUNT(*) FROM roles WHERE COALESCE(archived,0)=0").fetchone()[0]
         archived = c.execute("SELECT COUNT(*) FROM roles WHERE archived=1").fetchone()[0]
         all_counts = {k: 0 for k in db.STATUSES}

@@ -61,7 +61,6 @@
       <details class="fgroup" data-group="status" open>
         <summary>Status <span class="fbadge" id="badge-status"></span></summary>
         <ul class="status-list" id="statusList"></ul>
-        <label class="switch" title="Roles with a step (screen, interview, take-home…) still to do"><input type="checkbox" id="fTodo"><span class="track"></span><span>Has a step to do</span></label>
       </details>
 
       <details class="fgroup" data-group="fit" open>
@@ -75,9 +74,16 @@
         <a class="label-link fgroup-link" href="#/preferences" title="Edit interests">Edit interests</a>
       </details>
 
+      <details class="fgroup" data-group="location">
+        <summary>Location <span class="fbadge" id="badge-location"></span></summary>
+        <label class="switch"><input type="checkbox" id="fRemote"><span class="track"></span><span>Remote only</span></label>
+        <input class="finput" id="fLocInput" type="search" placeholder="City or state, then Enter" autocomplete="off"
+               title="Roles whose location contains this, e.g. Brooklyn or CA. Add several to match any of them.">
+        <div class="chip-filter" id="locFilter"></div>
+      </details>
+
       <details class="fgroup" data-group="role">
         <summary>Role details <span class="fbadge" id="badge-role"></span></summary>
-        <label class="switch"><input type="checkbox" id="fRemote"><span class="track"></span><span>Remote only</span></label>
         <label class="switch"><input type="checkbox" id="fPaid"><span class="track"></span><span>Pay listed</span></label>
         <label class="switch"><input type="checkbox" id="fDescribed"><span class="track"></span><span>Has a description</span></label>
         <label class="fselect" title="Top of the posted pay range; roles without pay are hidden"><span>Pays up to</span>
@@ -107,6 +113,7 @@
 
       <details class="fgroup" data-group="more">
         <summary>More <span class="fbadge" id="badge-more"></span></summary>
+        <label class="switch" title="Roles with a step (screen, interview, take-home…) still to do"><input type="checkbox" id="fTodo"><span class="track"></span><span>Has a step to do</span></label>
         <label class="switch" title="Archived roles are hidden everywhere (including search) unless this is on"><input type="checkbox" id="fArchived"><span class="track"></span><span>Include archived <span class="count-inline" id="archivedCount"></span></span></label>
       </details>
 
