@@ -1000,7 +1000,7 @@
         const res = await api(`/api/roles/${id}/screen`, { method: "POST" });
         if (current && current.id === id) { current = res.role; renderDrawer(); }
         const lv = matchInfo(res.role.ai_match);
-        toast(`Description saved. AI fit: ${lv.label}${res.role.ai_reason ? ` (${res.role.ai_reason})` : ""}`, "success");
+        toast(`Description saved. Assessed fit: ${lv.label}${res.role.ai_reason ? ` (${res.role.ai_reason})` : ""}`, "success");
         load();
       } catch (err) {
         if (current && current.id === id) setSaveState("");

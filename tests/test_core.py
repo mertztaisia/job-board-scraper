@@ -745,6 +745,16 @@ class SidebarFilterTests(TempDB):
         self.assertEqual(self.titles(todo="1"), ["B"])
         self.assertEqual(self.client.get("/api/roles", query_string={"min_pay": "lots"}).status_code, 400)
 
+    def test_remote_and_places_are_or(self):
+        db.update_role(self.conn, self.ids["a"], {"location": "Brooklyn, NY", "is_remote": 0})
+        db.update_role(self.conn, self.ids["b"], {"location": "San Francisco, CA", "is_remote": 0})
+        db.update_role(self.conn, self.ids["c"], {"location": "Remote (Austin, TX)", "is_remote": 1})
+        self.conn.commit()
+        self.assertEqual(self.titles(remote="1"), ["C"])
+        self.assertEqual(self.titles(loc="Brooklyn"), ["A"])
+        self.assertEqual(self.titles(remote="1", loc="Brooklyn"), ["A", "C"])           # remote OR Brooklyn
+        self.assertEqual(self.titles(remote="1", loc="Brooklyn", fit="strong"), ["A"])  # other filters still AND
+
     def test_location_filter_and_common_places(self):
         db.update_role(self.conn, self.ids["a"], {"location": "Brooklyn, NY"})
         db.update_role(self.conn, self.ids["b"], {"location": "San Francisco, CA"})

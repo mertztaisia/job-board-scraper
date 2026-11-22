@@ -111,8 +111,8 @@ Then create `.env` and run `service.ps1 install`.
 - **Search** by title, company, location, description or notes. Press `/` to jump to the search box.
 - **Filters** are in the left sidebar, in groups that collapse (click a heading; which are open is remembered). A badge on a group shows how many of its filters are on, and **Reset filters** clears them all and collapses every group.
   - **Status:** click one to show only that status; once one is selected, clicking others adds them.
-  - **Location:** a **Remote** chip, and places: type a city or state and press Enter, or click any city from your roles (most common first, including the city a remote listing names; **+N more** shows the rest). Matching is by whole word, any case ("CA" matches "San Jose, CA" but not "Chicago"); several places show roles in any of them.
-  - **AI fit:** Strong, Good, Partial, Weak, Not a fit, Unknown or Not screened.
+  - **Location:** a **Remote** chip, and places: type a city or state and press Enter, or click any city from your roles (most common first, including the city a remote listing names; **+N more** shows the rest). Matching is by whole word, any case ("CA" matches "San Jose, CA" but not "Chicago"). Everything picked here is an "or": Remote plus Brooklyn shows remote roles and Brooklyn roles.
+  - **Assessed Fit:** the AI's match level: Strong, Good, Partial, Weak, Not a fit, Unknown or Not screened.
   - **Interests:** roles tagged with your interests.
   - **Role details:** pay listed, has a description, pays up to at least $X, and years required at most N (roles that don't say are kept).
   - **Dates:** when the role was posted, and when it was added to the tracker.

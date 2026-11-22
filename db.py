@@ -1127,7 +1127,8 @@ def list_roles(conn, q="", statuses=None, remote=False, paid=False, tags=None,
     sites: job boards to keep ("manual" = roles you added yourself).
     has_description: only roles with a description.
     step_todo: only roles with a step still to do.
-    locations: place names ("Brooklyn", "CA"); a role matches if its location contains any of them."""
+    locations: place names ("Brooklyn", "CA"); a role matches if its location contains any of them.
+    remote together with locations: remote roles OR roles in those places."""
     # Archived roles are excluded at the SQL level unless asked for, so they are
     # never loaded, counted or searched in the default view.
     where, args = ([] if include_archived else ["COALESCE(archived, 0)=0"]), []
@@ -1138,8 +1139,6 @@ def list_roles(conn, q="", statuses=None, remote=False, paid=False, tags=None,
                      "OR EXISTS (SELECT 1 FROM role_qa qa WHERE qa.role_id=roles.id "
                      "AND (qa.question LIKE ? OR qa.answer LIKE ?)))")
         args += [like] * 8
-    if remote:
-        where.append("is_remote=1")
     if paid:
         where.append("pay_max IS NOT NULL")
     if tags:
@@ -1179,10 +1178,14 @@ def list_roles(conn, q="", statuses=None, remote=False, paid=False, tags=None,
     if step_todo:
         where.append("EXISTS (SELECT 1 FROM interview_rounds ir WHERE ir.role_id=roles.id "
                      "AND ir.status='scheduled')")
+    # Location: Remote and places are alternatives (OR): "Remote + Brooklyn" shows remote
+    # roles and Brooklyn roles. Places match whole words, any case ("CA" matches
+    # "San Jose, CA" but not "Chicago").
     locs = [l.strip() for l in (locations or []) if l and l.strip()]
-    if locs:
-        # Whole words, any case: "CA" matches "San Jose, CA" but not "Chicago".
-        where.append("(" + " OR ".join("location REGEXP ?" for _ in locs) + ")")
+    loc_parts = ["is_remote=1"] if remote else []
+    loc_parts += ["location REGEXP ?" for _ in locs]
+    if loc_parts:
+        where.append("(" + " OR ".join(loc_parts) + ")")
         args += [r"\b" + re.escape(l).replace(r"\ ", r"[\s,.-]+") + r"\b" for l in locs]
     base_where = " AND ".join(where) or "1=1"
 
