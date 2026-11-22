@@ -6,6 +6,8 @@ Quick command-line updates for the job tracker database.
   python jobs.py status "initech" interviewing --note "Phone screen Tue"
   python jobs.py add "Software Engineer" "Acme" --url https://... --status applied
   python jobs.py archive "acme"                         hide a role (add --undo to restore)
+  python jobs.py dupes                                 list roles that look like the same posting
+  python jobs.py merge 12 15 18                         merge duplicates #15 and #18 into #12
   python jobs.py find acme                             search roles
   python jobs.py list --status applied                 list roles by status
   python jobs.py scrape                                pull new roles (same as daily_jobs.py)
@@ -116,6 +118,12 @@ def main():
     ar.add_argument("query")
     ar.add_argument("--undo", action="store_true")
 
+    sub.add_parser("dupes", help="list roles that look like the same posting (read-only)")
+
+    mg = sub.add_parser("merge", help="merge duplicate roles into one (backs up the database first)")
+    mg.add_argument("keep", type=int, help="id of the role to keep")
+    mg.add_argument("others", type=int, nargs="+", help="ids of the duplicates to merge into it")
+
     f = sub.add_parser("find", help="search roles")
     f.add_argument("query", nargs="?", default="")
 
@@ -151,7 +159,7 @@ def main():
 
     elif args.cmd == "add":
         st = norm_status(args.status)
-        existing = db.find_existing(c, args.title, args.company, args.url)
+        existing = db.find_existing(c, args.title, args.company, args.url, location=args.location)
         if existing:
             print("Already in the database:")
             print(fmt(existing))
@@ -170,6 +178,27 @@ def main():
         db.update_role(c, rid, {k: v for k, v in extra.items() if v})
         c.commit()
         print(f"✓ Added #{rid}: {args.title} @ {args.company} [{db.STATUSES[st]}]")
+
+    elif args.cmd == "dupes":
+        groups = db.find_duplicate_groups(c)
+        if not groups:
+            print("No duplicates found.")
+        for g in groups:
+            print(f"{g[0]['title']}  ({g[0]['location']})")
+            for r in g:
+                print(f"  #{r['id']:<4} [{db.STATUSES[r['status']]:<12}] {r['company']}  via {r['site'] or 'manual'}")
+            print(f"  merge with:  python jobs.py merge {g[0]['id']} {' '.join(str(r['id']) for r in g[1:])}\n")
+
+    elif args.cmd == "merge":
+        rows = {i: c.execute("SELECT * FROM roles WHERE id=?", (i,)).fetchone() for i in [args.keep, *args.others]}
+        missing = [i for i, r in rows.items() if r is None]
+        if missing:
+            sys.exit(f"No role with id {', '.join(map(str, missing))}.")
+        print(f"Backup: {db.backup(c, reason='before-merge')}")
+        r = db.merge_roles(c, args.keep, args.others)
+        c.commit()
+        print(f"✓ Merged {', '.join('#' + str(i) for i in args.others)} into #{r['id']}: "
+              f"{r['title']} @ {r['company']} [{db.STATUSES[r['status']]}]")
 
     elif args.cmd == "archive":
         r = pick(c, args.query, include_archived=True)

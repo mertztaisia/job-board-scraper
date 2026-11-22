@@ -238,7 +238,8 @@ def create_role():
     except ValueError as e:
         return jsonify(error=str(e)), 400
     with conn() as c:
-        existing = db.find_existing(c, data["title"], data["company"], data.get("job_url"))
+        existing = db.find_existing(c, data["title"], data["company"], data.get("job_url"),
+                                     location=data.get("location"))
         if existing:
             return jsonify(error="This role is already in the database.",
                            id=existing["id"]), 409

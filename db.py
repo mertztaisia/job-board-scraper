@@ -727,22 +727,74 @@ def _clean(rec: dict) -> dict:
     return out
 
 
+# Legal and web endings that boards add to the same employer's name:
+# "Amazon", "Amazon.com", "Amazon.com Services LLC".
+_COMPANY_ENDINGS = {"inc", "incorporated", "llc", "l l c", "ltd", "limited", "corp", "corporation",
+                    "co", "company", "plc", "gmbh", "lp", "llp", "pbc", "sa", "ag", "bv", "nv"}
+
+
+def company_core(name) -> str:
+    """A company name reduced for duplicate matching: lower case, '.com' and punctuation
+    dropped, legal endings removed. 'Amazon.com Services LLC' -> 'amazon services'."""
+    s = re.sub(r"\.(com|io|ai|net|org|co)\b", " ", str(name or "").lower())
+    words = re.sub(r"[^\w&]+", " ", s).split()
+    while words and words[-1] in _COMPANY_ENDINGS:
+        words.pop()
+    return " ".join(words)
+
+
+def companies_match(a, b) -> bool:
+    """Same employer as different boards name it: equal after company_core, or one name
+    is the other plus more words ('amazon' / 'amazon services'), never part of a word."""
+    x, y = company_core(a), company_core(b)
+    if not x or not y:
+        return False
+    return x == y or x.startswith(y + " ") or y.startswith(x + " ")
+
+
+def _place_key(location) -> str:
+    """'New York, NY, US' -> 'new york'; 'Remote (Austin, TX)' -> 'remote'."""
+    s = str(location or "").strip().lower()
+    if s.startswith("remote"):
+        return "remote"
+    return re.split(r",|\.\s", s)[0].strip().rstrip(".")
+
+
 def find_existing(conn, title=None, company=None, job_url=None,
-                  within_days: int | None = DUPLICATE_WINDOW_DAYS):
-    """The role this posting duplicates, if any: same URL, or (as a fallback, for the
-    same posting on another job board) same title + company first seen within
-    `within_days` days. within_days=None matches title + company at any age."""
-    if job_url:
-        row = conn.execute("SELECT * FROM roles WHERE job_url=? OR job_url_direct=? "
-                           "ORDER BY id DESC LIMIT 1", (job_url, job_url)).fetchone()
-        if row:
-            return row
-    if title or company:
-        sql, args = "SELECT * FROM roles WHERE signature=?", [signature(title, company)]
-        if within_days is not None:
-            sql += " AND first_seen >= ?"
-            args.append((dt.datetime.now() - dt.timedelta(days=within_days)).isoformat(timespec="seconds"))
-        return conn.execute(sql + " ORDER BY id DESC LIMIT 1", args).fetchone()
+                  within_days: int | None = DUPLICATE_WINDOW_DAYS, location=None, job_url_direct=None):
+    """The role this posting duplicates, if any:
+    - same job URL (or the employer's own link), at any age; else
+    - same title and company first seen within `within_days` days (None = any age); else
+    - same title, the same employer under another name ("Amazon" / "Amazon.com Services
+      LLC") and the same city, within `within_days` days. Needs `location`."""
+    for url in (job_url, job_url_direct):
+        if url:
+            row = conn.execute("SELECT * FROM roles WHERE job_url=? OR job_url_direct=? "
+                               "ORDER BY id DESC LIMIT 1", (url, url)).fetchone()
+            if row:
+                return row
+    if not (title or company):
+        return None
+    since = None
+    if within_days is not None:
+        since = (dt.datetime.now() - dt.timedelta(days=within_days)).isoformat(timespec="seconds")
+    sql, args = "SELECT * FROM roles WHERE signature=?", [signature(title, company)]
+    if since:
+        sql += " AND first_seen >= ?"
+        args.append(since)
+    row = conn.execute(sql + " ORDER BY id DESC LIMIT 1", args).fetchone()
+    if row or not (title and company and location):
+        return row
+    # Same title (exactly, ignoring case and spacing), employer named differently, same place.
+    prefix = _norm(title) + "||"
+    sql, args = "SELECT * FROM roles WHERE substr(signature, 1, ?) = ?", [len(prefix), prefix]
+    if since:
+        sql += " AND first_seen >= ?"
+        args.append(since)
+    place = _place_key(location)
+    for cand in conn.execute(sql + " ORDER BY id DESC", args):
+        if companies_match(company, cand["company"]) and place and _place_key(cand["location"]) == place:
+            return cand
     return None
 
 
@@ -765,6 +817,89 @@ def fill_blanks(conn, role_id: int, rec: dict) -> list[str]:
                         f"Description added from another listing ({new.get('site') or 'scrape'})")
         return names
     return []
+
+
+def find_duplicate_groups(conn) -> list[list[dict]]:
+    """Roles already in the database that the duplicate rule (see find_existing) treats
+    as one posting: same title, same employer under any of its names, same city, first
+    seen within DUPLICATE_WINDOW_DAYS of each other. Read-only; oldest first in each group."""
+    rows = [dict(r) for r in conn.execute(
+        "SELECT id, title, company, location, site, status, first_seen, job_url FROM roles ORDER BY id")]
+    by_title: dict[str, list[dict]] = {}
+    for r in rows:
+        by_title.setdefault(_norm(r["title"]), []).append(r)
+    groups, window = [], dt.timedelta(days=DUPLICATE_WINDOW_DAYS)
+    for same_title in by_title.values():
+        used = set()
+        for i, a in enumerate(same_title):
+            if a["id"] in used:
+                continue
+            group = [a]
+            for b in same_title[i + 1:]:
+                if b["id"] in used:
+                    continue
+                near = abs(dt.datetime.fromisoformat(a["first_seen"]) - dt.datetime.fromisoformat(b["first_seen"])) <= window
+                if near and companies_match(a["company"], b["company"]) and \
+                        _place_key(a["location"]) and _place_key(a["location"]) == _place_key(b["location"]):
+                    group.append(b)
+            if len(group) > 1:
+                used.update(r["id"] for r in group)
+                groups.append(group)
+    return groups
+
+
+# How far along a status is, for keeping the furthest one when merging duplicates.
+_STATUS_PROGRESS = {"not_applied": 0, "interested": 1, "not_a_fit": 1, "closed": 1, "applied": 2,
+                    "withdrawn": 3, "rejected": 3, "interviewing": 4, "offer": 5}
+
+
+def merge_roles(conn, keep_id: int, other_ids: list[int]) -> dict | None:
+    """Merge duplicate roles into one. The kept role gets:
+    - every history entry, step and question of the others (nothing is lost);
+    - the others' values for any field it's missing, and their notes appended;
+    - the earliest applied date, and the furthest status (e.g. Applied over Not applied);
+    - their URLs remembered as seen, so a later pull doesn't add them again.
+    The other roles are then deleted. Returns the merged role, or None if keep_id is missing."""
+    keep = conn.execute("SELECT * FROM roles WHERE id=?", (keep_id,)).fetchone()
+    if not keep:
+        return None
+    others = [conn.execute("SELECT * FROM roles WHERE id=?", (i,)).fetchone() for i in other_ids if i != keep_id]
+    others = [o for o in others if o]
+    if not others:
+        return get_role(conn, keep_id)
+    fill_fields = ROLE_FIELDS + ["resume_path", "offer_deadline", "offer_salary", "offer_details",
+                                 "ai_verdict", "ai_reason", "ai_tags", "ai_flags", "ai_screened_at",
+                                 "ai_model", "ai_match"]
+    changes, notes = {}, [keep["notes"]] if keep["notes"] else []
+    status = keep["status"]
+    applied = [r["applied_at"] for r in [keep, *others] if r["applied_at"]]
+    for o in others:
+        for f in fill_fields:
+            if keep[f] is None and changes.get(f) is None and o[f] is not None:
+                changes[f] = o[f]
+        if o["notes"] and o["notes"] not in notes:
+            notes.append(o["notes"])
+        if _STATUS_PROGRESS.get(o["status"], 0) > _STATUS_PROGRESS.get(status, 0):
+            status = o["status"]
+    if applied:
+        changes["applied_at"] = min(applied)
+    if len(notes) > 1:
+        changes["notes"] = "\n\n".join(notes)
+    if status != keep["status"]:
+        changes["status"] = status
+    ids = [o["id"] for o in others]
+    marks = ", ".join("?" * len(ids))
+    for table in ("status_history", "interview_rounds", "role_qa"):
+        conn.execute(f"UPDATE {table} SET role_id=? WHERE role_id IN ({marks})", [keep_id, *ids])
+    mark_seen(conn, [u for o in others for u in (o["job_url"], o["job_url_direct"]) if u])
+    conn.execute(f"DELETE FROM roles WHERE id IN ({marks})", ids)
+    if changes:
+        changes["updated_at"] = now_iso()
+        conn.execute(f"UPDATE roles SET {', '.join(f'{k}=?' for k in changes)} WHERE id=?",
+                     list(changes.values()) + [keep_id])
+    desc = "; ".join(f"#{o['id']} ({o['site'] or 'manual'}: {o['company']})" for o in others)
+    add_history(conn, keep_id, status, f"Merged duplicate role(s) into this one: {desc}")
+    return get_role(conn, keep_id)
 
 
 def role_exists(conn, role_id: int) -> bool:
@@ -795,7 +930,8 @@ def upsert_role(conn, rec: dict, status="not_applied", note=None):
     if status not in STATUSES:
         raise ValueError(f"Unknown status '{status}'. Use one of: {', '.join(STATUSES)}")
     rec_c = _clean(rec)
-    existing = find_existing(conn, rec_c["title"], rec_c["company"], rec_c["job_url"])
+    existing = find_existing(conn, rec_c["title"], rec_c["company"], rec_c["job_url"],
+                             location=rec_c["location"], job_url_direct=rec_c["job_url_direct"])
     ts = now_iso()
     if existing:
         sets = ", ".join(f"{f}=COALESCE({f}, ?)" for f in ROLE_FIELDS)

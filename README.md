@@ -2,7 +2,7 @@
 
 Everything lives in **`jobs.db`**, a SQLite file. By default it's in this folder; set `JOBS_DB` in `.env` to keep it elsewhere (recommended: outside OneDrive, see [Backups and where the database lives](#backups-and-where-the-database-lives)).
 Each role is stored with all its scraped metadata, its status, the date you applied, the path to the resume you used, notes and a status history.
-The scraper skips postings already in the database. The same posting on two job boards (same URL, or same title and company within 30 days) is one role; a repost or new opening after that gets its own row. When a later listing of a role you already have carries details the first one lacked (for example a description LinkedIn didn't return but ZipRecruiter did), they're filled in, never overwriting what's there, and the role is AI-screened again if it had no description to go on.
+The scraper skips postings already in the database. The same posting on two job boards (same URL or employer link, or same title and company within 30 days) is one role. Boards often name the employer differently ("Amazon", "Amazon.com", "Amazon.com Services LLC"), so names are compared without case, punctuation, ".com" or legal endings like Inc and LLC, and one name may be the other plus more words, as long as the title and city match too; a repost or new opening after that gets its own row. When a later listing of a role you already have carries details the first one lacked (for example a description LinkedIn didn't return but ZipRecruiter did), they're filled in, never overwriting what's there, and the role is AI-screened again if it had no description to go on.
 
 ## 1. Run it (local deployment)
 The tracker is a small web service on your computer:
@@ -174,6 +174,13 @@ This marks the role applied today, attached to your newest resume.
 ```
 ```powershell
 .\.venv\Scripts\python.exe jobs.py find acme
+```
+List roles that look like the same posting (read-only), then merge a group into one role. Merging keeps every history entry, step and question, the earliest applied date and the furthest status, fills in missing details, and backs up the database first:
+```powershell
+.\.venv\Scripts\python.exe jobs.py dupes
+```
+```powershell
+.\.venv\Scripts\python.exe jobs.py merge 12 15 18
 ```
 ```powershell
 .\.venv\Scripts\python.exe jobs.py list --status applied,interviewing

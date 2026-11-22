@@ -794,5 +794,63 @@ class NoLimitTests(TempDB):
         self.assertTrue(db.validate_prefs({**p, "results_all": "yes"}))
 
 
+class CompanyNameDuplicateTests(TempDB):
+    """The same posting under different company names on different boards."""
+    TITLE = "Software Development Engineer, Amazon Legal Technologies"
+
+    def test_company_names(self):
+        self.assertEqual(db.company_core("Amazon.com Services LLC"), "amazon services")
+        self.assertTrue(db.companies_match("Amazon", "Amazon.com"))
+        self.assertTrue(db.companies_match("Amazon", "Amazon.com Services LLC"))
+        self.assertTrue(db.companies_match("Acme, Inc.", "ACME"))
+        self.assertFalse(db.companies_match("Meta", "Metabase"))
+        self.assertFalse(db.companies_match("Amazon", "Google"))
+
+    def test_pull_merges_three_boards_into_one_role(self):
+        res = run_pull([
+            job(title=self.TITLE, company="Amazon", site="linkedin", job_url="https://li/1", location="New York, NY"),
+            job(title=self.TITLE, company="Amazon.com", site="indeed", job_url="https://in/2", location="New York, NY, US",
+                job_url_direct="https://amazon.jobs/10562333"),
+            job(title=self.TITLE, company="Amazon.com Services LLC", site="glassdoor", job_url="https://gd/3",
+                location="New York, NY")])
+        self.assertEqual(res["added"], 1)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM roles").fetchone()[0], 1)
+        self.assertEqual(self.conn.execute("SELECT job_url_direct FROM roles").fetchone()[0], "https://amazon.jobs/10562333")
+
+    def test_different_city_or_title_stays_separate(self):
+        run_pull([job(title=self.TITLE, company="Amazon", job_url="https://li/1", location="New York, NY"),
+                  job(title=self.TITLE, company="Amazon.com", job_url="https://in/2", location="Seattle, WA",
+                      is_remote=False),
+                  job(title="Software Engineer II", company="Amazon.com", job_url="https://in/3", location="New York, NY")])
+        # Seattle is filtered out by the NYC search; the different title is its own role
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM roles").fetchone()[0], 2)
+
+    def test_dupes_and_merge(self):
+        a, _ = db.upsert_role(self.conn, job(title=self.TITLE, company="Amazon", job_url="https://li/1", site="linkedin"))
+        # older rows made before the looser matching existed: insert directly
+        for company, url, site in (("Amazon.com", "https://in/2", "indeed"), ("Amazon.com Services LLC", "https://gd/3", "glassdoor")):
+            self.conn.execute(
+                "INSERT INTO roles(signature, title, company, location, site, job_url, status, first_seen, updated_at) "
+                "VALUES(?,?,?,?,?,?, 'not_applied', ?, ?)",
+                (db.signature(self.TITLE, company), self.TITLE, company, "New York, NY, US", site, url, db.now_iso(), db.now_iso()))
+        ids = [r[0] for r in self.conn.execute("SELECT id FROM roles ORDER BY id")]
+        b, c = ids[1], ids[2]
+        db.update_role(self.conn, b, {"status": "applied", "applied_at": "2026-11-22", "notes": "applied via site"})
+        db.update_role(self.conn, c, {"status": "applied", "applied_at": "2026-11-21", "resume_path": "r.pdf"})
+        db.add_round(self.conn, c, {"kind": "recruiter"})
+        db.add_qa(self.conn, b, "Why Amazon?", "Scale")
+        groups = db.find_duplicate_groups(self.conn)
+        self.assertEqual([[r["id"] for r in g] for g in groups], [[a, b, c]])
+        merged = db.merge_roles(self.conn, b, [a, c])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM roles").fetchone()[0], 1)
+        self.assertEqual(merged["status"], "interviewing")          # furthest status (c got a step)
+        self.assertEqual(merged["applied_at"], "2026-11-21")        # earliest applied date
+        self.assertEqual(merged["resume_path"], "r.pdf")            # filled from a duplicate
+        self.assertEqual((len(merged["rounds"]), len(merged["qa"])), (1, 1))
+        self.assertIn("Merged duplicate role(s)", merged["history"][0]["note"])
+        self.assertTrue(db.is_seen(self.conn, "https://li/1"))
+        self.assertEqual(db.find_duplicate_groups(self.conn), [])
+
+
 if __name__ == "__main__":
     unittest.main()

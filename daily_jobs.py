@@ -377,7 +377,8 @@ def _run(reuse, ignore_seen, use_ai, trigger, log) -> dict:
         filled_ids: dict[int, list[str]] = {}   # roles already in the DB that got new details
         for job in jobs:
             key = job.get("job_url") or job.get("id")
-            existing = db.find_existing(conn, job.get("title"), job.get("company"), job.get("job_url"))
+            existing = db.find_existing(conn, job.get("title"), job.get("company"), job.get("job_url"),
+                                        location=job.get("location"), job_url_direct=job.get("job_url_direct"))
             if existing is not None:
                 # Same posting as a role we already have (same URL, or same title and
                 # company on another board within 30 days). Don't add it again, but fill
