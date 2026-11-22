@@ -1,0 +1,5 @@
+flask==3.1.3
+waitress==3.0.2
+anthropic==2.12.0
+# pinned to a known-good commit; the scraper changes often upstream
+python-jobspy @ git+https://github.com/speedyapply/JobSpy.git@c1be997b61d6acefec8328f5f56c968ceef7e28a
