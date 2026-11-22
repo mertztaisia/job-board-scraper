@@ -1072,7 +1072,12 @@
 
   // ------------------------------------------------------------------ Pull / re-screen tasks
   let pollT = null;
+  // "Don't show this again" on the pull confirmation is remembered in this browser;
+  // Preferences → AI screening → "Ask before each pull" turns it back on.
+  const askBeforePull = () => !store.get("skipPullConfirm", false);
+
   async function startScrape() {
+    if (!askBeforePull()) return runPull();
     let runs = { month_cost: 0, runs: [] };
     try { runs = await api("/api/runs"); } catch { /* ignore */ }
     const lastPull = runs.runs.find((r) => r.kind === "pull" && r.status !== "running");
@@ -1091,9 +1096,16 @@
           <dt>AI spend this month</dt><dd>${dollars(runs.month_cost, 4)}</dd>
           <dt>AI screening</dt><dd>${aiOn ? '<span class="ok-text">on</span>' : '<span class="bad-text">off: ' + (META.ai.configured ? "disabled in Preferences" : "no API key yet, so this pull costs nothing") + "</span>"}</dd>
           <dt>Takes</dt><dd>about 2–5 minutes</dd>
-        </dl>`,
+        </dl>
+        <label class="switch" style="padding:12px 0 0"><input type="checkbox" id="skipPullConfirm"><span class="track"></span>
+          <span>Don't show this again <span class="cell-dim">(turn it back on in Preferences → AI screening)</span></span></label>`,
     });
-    if (!ok) return;
+    if (!ok) return;   // cancelling never saves "don't show again"
+    if ($("#skipPullConfirm")?.checked) store.set("skipPullConfirm", true);
+    return runPull();
+  }
+
+  async function runPull() {
     try { await api("/api/scrape", { method: "POST" }); }
     catch (e) { if (e.status !== 409) { toast(e.message, "error"); return; } }
     showTask(true, "pull");
@@ -1406,6 +1418,8 @@
             : `<span class="bad-text">No key found.</span>`}</div>
            ${key.configured ? "" : `<div class="prow-help" style="margin:0">Create the file <span class="code">${esc(key.env_file)}</span> containing one line:
              <span class="code">ANTHROPIC_API_KEY=sk-ant-…</span>, then restart the tracker. Until then, pulls still work but skip the AI screen.</div>`}`)}
+        ${row("Ask before each pull", "Show the cost reminder when you click Pull new roles. Saved in this browser, right away.",
+          `<label class="switch"><input type="checkbox" id="askBeforePull" ${askBeforePull() ? "checked" : ""}><span class="track"></span><span>Confirm before pulling new roles</span></label>`)}
         ${row("Re-screen", "Run the AI again on roles already in the database, e.g. after changing preferences. Save your changes first.",
           `<div class="inline"><button class="btn primary" data-rescreen="all">Re-screen all open roles</button>
            <button class="btn" data-rescreen="unscreened">Only unscreened roles</button></div>
@@ -1530,6 +1544,11 @@
       if (!META.ai.configured) { toast("Add an API key first (see AI screening).", "error"); return; }
       startRescreen(b.dataset.rescreen);
     });
+    // A browser setting, not a search preference: applies immediately, no Save needed.
+    $("#askBeforePull").onchange = (e) => {
+      store.set("skipPullConfirm", !e.target.checked);
+      toast(e.target.checked ? "You'll be asked before each pull." : "Pulls will start without asking.", "success");
+    };
     const tk = $("#testKey");
     if (tk) tk.onclick = async () => {
       $("#testResult").textContent = "Testing…";

@@ -81,7 +81,7 @@ python -m venv .venv
 Then create `.env` and run `service.ps1 install`.
 
 ## Using the UI
-- **Pull new roles** (top right) scrapes the job boards using your saved preferences, adds new matches as **Not applied**, then has Claude screen them. It asks for confirmation first, because the AI screen costs money (about $0.0005 per role with Haiku 5.5). A run takes about 2-5 minutes. Only one pull or re-screen runs at a time, including the daily scheduled one; starting a second shows a message instead. When it finishes, a summary shows how many searches ran, postings found per board, how many were already tracked (and which got missing details filled in), why the rest were filtered out, how many new roles were added, and what the AI screen did and cost.
+- **Pull new roles** (top right) scrapes the job boards using your saved preferences, adds new matches as **Not applied**, then has Claude screen them. It asks for confirmation first, because the AI screen costs money (about $0.0005 per role with Haiku 5.5). Tick **Don't show this again** to skip that step in this browser; turn **Ask before each pull** back on in Preferences → AI screening. A run takes about 2-5 minutes. Only one pull or re-screen runs at a time, including the daily scheduled one; starting a second shows a message instead. When it finishes, a summary shows how many searches ran, postings found per board, how many were already tracked (and which got missing details filled in), why the rest were filtered out, how many new roles were added, and what the AI screen did and cost.
 - **Preferences:** click the logo and choose Preferences to edit:
   - search terms, locations, experience and pay
   - employment type, title and company filters
