@@ -27,6 +27,55 @@
   state.page = 1;
   state.pageSize = [25, 50, 100].includes(store.get("pageSize", 50)) ? store.get("pageSize", 50) : 50;
   let roles = [];
+
+  // ------------------------------------------------------------------ Search and filters <-> URL
+  // The roles view's search and filters live in the address bar (#/?q=ml&fit=strong,good),
+  // so a view can be bookmarked, shared or reloaded. Only values that differ from the
+  // defaults are written. A URL with filters in it wins over the last filters remembered.
+  const URL_KEYS = [   // [state key, URL parameter, kind]
+    ["q", "q", "text"], ["statuses", "status", "list"], ["fits", "fit", "list"], ["tags", "tags", "pipe"],
+    ["remote", "remote", "flag"], ["paid", "paid", "flag"], ["described", "described", "flag"], ["todo", "todo", "flag"],
+    ["minPay", "min_pay", "text"], ["maxYears", "max_years", "text"], ["posted", "posted", "text"], ["added", "added", "text"],
+    ["sites", "sites", "list"], ["archived", "archived", "flag"],
+    ["sort", "sort", "text"], ["order", "order", "text"], ["page", "page", "int"],
+  ];
+  const URL_DEFAULTS = { q: "", ...FILTER_DEFAULTS, archived: false, sort: "status", order: "asc", page: 1 };
+  function hashParams() {
+    const i = location.hash.indexOf("?");
+    return new URLSearchParams(i >= 0 ? location.hash.slice(i + 1) : "");
+  }
+  function stateFromUrl() {
+    const p = hashParams();
+    if (![...p.keys()].length) return false;
+    Object.assign(state, structuredClone(URL_DEFAULTS));
+    for (const [key, name, kind] of URL_KEYS) {
+      if (!p.has(name)) continue;
+      const v = p.get(name);
+      state[key] = kind === "list" ? v.split(",").filter(Boolean)
+        : kind === "pipe" ? v.split("|").filter(Boolean)
+        : kind === "flag" ? v === "1"
+        : kind === "int" ? Math.max(1, parseInt(v, 10) || 1) : v;
+    }
+    return true;
+  }
+  function urlFromState() {
+    const parts = [];
+    for (const [key, name, kind] of URL_KEYS) {
+      const v = state[key];
+      let out = null;
+      if (kind === "list" || kind === "pipe") out = v.length ? v.map(encodeURIComponent).join(kind === "pipe" ? "|" : ",") : null;
+      else if (kind === "flag") out = v ? "1" : null;
+      else if (v !== URL_DEFAULTS[key] && v !== "" && v != null) out = encodeURIComponent(String(v));
+      if (out != null) parts.push(`${name}=${out}`);
+    }
+    return "#/" + (parts.length ? "?" + parts.join("&") : "");
+  }
+  // Keep the address bar in step with the roles view, without adding a history entry per click.
+  function syncUrl() {
+    if (route() !== "roles") return;
+    const want = urlFromState();
+    if (location.hash !== want) history.replaceState(null, "", want);
+  }
   let selectedId = null;
   let current = null;
 
@@ -293,6 +342,7 @@
     $("#archivedCount").textContent = data.archived_count ? `(${data.archived_count})` : "";
     store.set("filters.v2", { ...state, q: "", archived: false, sort: "status", order: "asc", page: 1 });
     syncFilterControls();
+    syncUrl();
   }
 
   // Filters, search and sort changes go back to page 1.
@@ -1755,7 +1805,11 @@
     hideTip();
     if (r === "preferences") { closeDrawer(); await openPreferences(); }
     else if (r === "insights") { closeDrawer(); editingTarget = null; await openInsights(); }
-    else load();
+    else {
+      // A URL with filters (pasted, bookmarked, back/forward) sets them; a bare #/ keeps the current ones.
+      if (stateFromUrl()) $("#q").value = state.q;
+      load();
+    }
   }
 
   // ------------------------------------------------------------------ Wiring

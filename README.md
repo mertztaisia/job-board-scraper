@@ -117,6 +117,7 @@ Then create `.env` and run `service.ps1 install`.
   - **Dates:** when the role was posted, and when it was added to the tracker.
   - **Source:** the job board it came from, or added by you.
   - **More:** include archived roles.
+  - **The address bar keeps your view:** the search, filters, sort and page are in the URL, for example `http://localhost:5055/#/?q=machine%20learning&fit=strong,good&remote=1`. Bookmark it, share it or reload; opening a link like that applies its filters.
 - **Click a role** to open its details:
   - set the status with one click
   - set the applied date
