@@ -811,39 +811,39 @@ class NoLimitTests(TempDB):
 
 class CompanyNameDuplicateTests(TempDB):
     """The same posting under different company names on different boards."""
-    TITLE = "Software Development Engineer, Amazon Legal Technologies"
+    TITLE = "Software Development Engineer, Globex Legal Technologies"
 
     def test_company_names(self):
-        self.assertEqual(db.company_core("Amazon.com Services LLC"), "amazon services")
-        self.assertTrue(db.companies_match("Amazon", "Amazon.com"))
-        self.assertTrue(db.companies_match("Amazon", "Amazon.com Services LLC"))
+        self.assertEqual(db.company_core("Globex.com Services LLC"), "globex services")
+        self.assertTrue(db.companies_match("Globex", "Globex.com"))
+        self.assertTrue(db.companies_match("Globex", "Globex.com Services LLC"))
         self.assertTrue(db.companies_match("Acme, Inc.", "ACME"))
-        self.assertFalse(db.companies_match("Meta", "Metabase"))
-        self.assertFalse(db.companies_match("Amazon", "Google"))
+        self.assertFalse(db.companies_match("Hooli", "Hoolibase"))
+        self.assertFalse(db.companies_match("Globex", "Initech"))
 
     def test_pull_merges_three_boards_into_one_role(self):
         res = run_pull([
-            job(title=self.TITLE, company="Amazon", site="linkedin", job_url="https://li/1", location="New York, NY"),
-            job(title=self.TITLE, company="Amazon.com", site="indeed", job_url="https://in/2", location="New York, NY, US",
-                job_url_direct="https://amazon.jobs/10562333"),
-            job(title=self.TITLE, company="Amazon.com Services LLC", site="glassdoor", job_url="https://gd/3",
+            job(title=self.TITLE, company="Globex", site="linkedin", job_url="https://li/1", location="New York, NY"),
+            job(title=self.TITLE, company="Globex.com", site="indeed", job_url="https://in/2", location="New York, NY, US",
+                job_url_direct="https://jobs.globex.example/123"),
+            job(title=self.TITLE, company="Globex.com Services LLC", site="glassdoor", job_url="https://gd/3",
                 location="New York, NY")])
         self.assertEqual(res["added"], 1)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM roles").fetchone()[0], 1)
-        self.assertEqual(self.conn.execute("SELECT job_url_direct FROM roles").fetchone()[0], "https://amazon.jobs/10562333")
+        self.assertEqual(self.conn.execute("SELECT job_url_direct FROM roles").fetchone()[0], "https://jobs.globex.example/123")
 
     def test_different_city_or_title_stays_separate(self):
-        run_pull([job(title=self.TITLE, company="Amazon", job_url="https://li/1", location="New York, NY"),
-                  job(title=self.TITLE, company="Amazon.com", job_url="https://in/2", location="Seattle, WA",
+        run_pull([job(title=self.TITLE, company="Globex", job_url="https://li/1", location="New York, NY"),
+                  job(title=self.TITLE, company="Globex.com", job_url="https://in/2", location="Seattle, WA",
                       is_remote=False),
-                  job(title="Software Engineer II", company="Amazon.com", job_url="https://in/3", location="New York, NY")])
+                  job(title="Software Engineer II", company="Globex.com", job_url="https://in/3", location="New York, NY")])
         # Seattle is filtered out by the NYC search; the different title is its own role
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM roles").fetchone()[0], 2)
 
     def test_dupes_and_merge(self):
-        a, _ = db.upsert_role(self.conn, job(title=self.TITLE, company="Amazon", job_url="https://li/1", site="linkedin"))
+        a, _ = db.upsert_role(self.conn, job(title=self.TITLE, company="Globex", job_url="https://li/1", site="linkedin"))
         # older rows made before the looser matching existed: insert directly
-        for company, url, site in (("Amazon.com", "https://in/2", "indeed"), ("Amazon.com Services LLC", "https://gd/3", "glassdoor")):
+        for company, url, site in (("Globex.com", "https://in/2", "indeed"), ("Globex.com Services LLC", "https://gd/3", "glassdoor")):
             self.conn.execute(
                 "INSERT INTO roles(signature, title, company, location, site, job_url, status, first_seen, updated_at) "
                 "VALUES(?,?,?,?,?,?, 'not_applied', ?, ?)",
@@ -853,7 +853,7 @@ class CompanyNameDuplicateTests(TempDB):
         db.update_role(self.conn, b, {"status": "applied", "applied_at": "2026-11-22", "notes": "applied via site"})
         db.update_role(self.conn, c, {"status": "applied", "applied_at": "2026-11-21", "resume_path": "r.pdf"})
         db.add_round(self.conn, c, {"kind": "recruiter"})
-        db.add_qa(self.conn, b, "Why Amazon?", "Scale")
+        db.add_qa(self.conn, b, "Why Globex?", "Scale")
         groups = db.find_duplicate_groups(self.conn)
         self.assertEqual([[r["id"] for r in g] for g in groups], [[a, b, c]])
         merged = db.merge_roles(self.conn, b, [a, c])
@@ -958,6 +958,121 @@ class ZipRecruiterDescriptionTests(TempDB):
             daily_jobs._zip_fetcher, daily_jobs.ZIP_PAUSE = saved, pause
         self.assertEqual((r["missing"], r["described"]), (1, [rid]))
         self.assertEqual(db.get_role(self.conn, rid)["description"], "Backfilled")
+
+
+class ReviewFixTests(TempDB):
+    """Fixes from the pre-merge review."""
+
+    def setUp(self):
+        super().setUp()
+        import app
+        self.client = app.app.test_client()
+
+    def test_remote_listing_without_a_location_is_kept(self):
+        prefs = {"locations": dict(TEST_PREFS["locations"])}
+        self.assertEqual(daily_jobs.location_ok({"is_remote": True, "location": ""}, prefs), (True, "Remote"))
+        self.assertTrue(daily_jobs.location_ok({"is_remote": True, "location": None}, prefs)[0])
+
+    def test_pay_with_only_a_minimum_is_annualised_once(self):
+        self.assertEqual(daily_jobs.salary_range({"min_amount": 50, "max_amount": None, "interval": "hourly"}),
+                         (104000, 104000))
+
+    def test_infinite_or_nan_numbers_are_rejected(self):
+        rid, _ = db.upsert_role(self.conn, job())
+        self.conn.commit()
+        for field, value in (("pay_min", "inf"), ("pay_max", "1e999"), ("offer_salary", "nan"), ("years_min", "inf")):
+            r = self.client.patch(f"/api/roles/{rid}", json={field: value})
+            self.assertEqual(r.status_code, 400, (field, value))
+        self.assertIsNone(db.get_role(self.conn, rid)["pay_min"])
+
+    def test_failed_pull_keeps_nothing_it_half_wrote(self):
+        orig = db.mark_seen
+
+        def boom(*a, **k):
+            raise RuntimeError("disk full")
+        db.mark_seen = boom
+        try:
+            with self.assertRaises(RuntimeError):
+                run_pull([job()])
+        finally:
+            db.mark_seen = orig
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM roles").fetchone()[0], 0)
+        self.assertEqual(self.conn.execute("SELECT status FROM scrape_runs ORDER BY id DESC").fetchone()[0], "error")
+
+    def test_zip_setup_failure_skips_only_that_step(self):
+        saved = daily_jobs._zip_fetcher
+
+        def broken():
+            raise AttributeError("JobSpy changed")
+        daily_jobs._zip_fetcher = broken
+        try:
+            res = run_pull([job(site="zip_recruiter", job_url="https://zip/keep", description=None)])
+        finally:
+            daily_jobs._zip_fetcher = saved
+        self.assertEqual(res["added"], 1)                       # the pull still finished
+        self.assertEqual(res["zip_descriptions"]["tried"], 0)
+        self.assertIn("JobSpy changed", res["zip_descriptions"]["error"])
+
+    def test_bad_step_input_is_400_and_saves_nothing(self):
+        rid, _ = db.upsert_role(self.conn, job())
+        db.update_role(self.conn, rid, {"status": "applied"})
+        self.conn.commit()
+        for bad in ({"kind": "lunch"}, {"round_number": "two"}, {"round_number": 0},
+                    {"status": "maybe"}, {"scheduled_on": "next week"}, {"notes": 5}):
+            r = self.client.post(f"/api/roles/{rid}/rounds", json=bad)
+            self.assertEqual(r.status_code, 400, bad)
+        role = db.get_role(self.conn, rid)
+        self.assertEqual((role["rounds"], role["status"]), ([], "applied"))
+        # the UI's blank fields still work
+        r = self.client.post(f"/api/roles/{rid}/rounds", json={"kind": "", "scheduled_on": "", "status": "scheduled"})
+        self.assertEqual(r.status_code, 200)
+        step = r.get_json()["rounds"][0]
+        self.assertEqual(self.client.patch(f"/api/rounds/{step['id']}", json={"status": ""}).status_code, 400)
+        self.assertEqual(self.client.patch(f"/api/rounds/{step['id']}", json={"status": "waiting"}).status_code, 200)
+        r = self.client.patch(f"/api/rounds/{step['id']}", json={"status": "passed", "create_next": True, "next": "x"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_steps_and_questions_of_another_role_are_refused(self):
+        a, _ = db.upsert_role(self.conn, job())
+        b, _ = db.upsert_role(self.conn, job(title="Backend Engineer", job_url="https://example.com/b"))
+        other_step = db.add_round(self.conn, b, {"kind": "recruiter"})
+        qa_id = db.add_qa(self.conn, a, "Why us?", "Because")
+        self.conn.commit()
+        r = self.client.post(f"/api/roles/{a}/transition",
+                             json={"status": "interviewing", "round": {"id": other_step, "status": "passed"}})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(db.current_status(self.conn, a), "not_applied")       # the move was rolled back too
+        self.assertEqual(db.list_rounds(self.conn, b)[0]["status"], "scheduled")
+        self.assertEqual(self.client.post(f"/api/roles/{a}/qa", json={"question": "Q", "round_id": other_step}).status_code, 400)
+        self.assertEqual(self.client.patch(f"/api/qa/{qa_id}", json={"round_id": other_step}).status_code, 400)
+        self.assertEqual(self.client.patch(f"/api/qa/{qa_id}", json={"question": "  "}).status_code, 400)
+        self.assertEqual(self.client.post(f"/api/roles/{a}/qa", json={"items": ["not an object"]}).status_code, 400)
+        self.assertEqual(self.client.post(f"/api/roles/{a}/transition", json={"qa": [1]}).status_code, 400)
+
+    def test_resume_check_needs_no_folder_walk_and_stays_inside(self):
+        (db.BASE_DIR / "cv.pdf").write_bytes(b"%PDF")
+        (db.BASE_DIR / ".git").mkdir()
+        (db.BASE_DIR / ".git" / "x.pdf").write_bytes(b"%PDF")
+        outside = self.tmp / "elsewhere.pdf"
+        outside.write_bytes(b"%PDF")
+        self.assertTrue(db.is_resume_file(db.BASE_DIR / "cv.pdf"))
+        self.assertTrue(db.is_resume_file(db.BASE_DIR / "sub" / ".." / "cv.pdf"))
+        self.assertFalse(db.is_resume_file(db.BASE_DIR / ".git" / "x.pdf"))
+        self.assertFalse(db.is_resume_file(db.BASE_DIR / ".." / "elsewhere.pdf"))
+        self.assertFalse(db.is_resume_file(db.BASE_DIR / "missing.pdf"))
+        self.assertEqual(self.client.get("/api/file", query_string={"path": str(outside)}).status_code, 403)
+        self.assertEqual(self.client.get("/api/file").status_code, 403)
+        self.assertEqual({db.is_resume_file(p) for p in db.resume_files()}, {True})
+
+    def test_archived_applications_still_count_in_insights(self):
+        import insights
+        rid, _ = db.upsert_role(self.conn, job())
+        db.update_role(self.conn, rid, {"status": "rejected", "applied_at": dt.date.today().isoformat()})
+        db.set_archived(self.conn, rid, True)
+        out = insights.build(self.conn, 8)
+        self.assertEqual(out["progress"]["applications_this_week"], 1)
+        self.assertEqual(out["applying"]["total"], 1)
+        self.assertEqual({s["stage"]: s["count"] for s in out["funnel"]}["Tracked"], 0)
 
 
 if __name__ == "__main__":

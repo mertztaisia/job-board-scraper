@@ -349,6 +349,7 @@ def screen_one_role(role_id: int, trigger="ui") -> dict | None:
             try:
                 t = screen_roles(conn, [role_id], log=messages.append, restore_ids=restore, run_id=run_id)
             except Exception as e:
+                conn.rollback()
                 db.finish_run(conn, run_id, status="error", log=str(e))
                 raise
             db.finish_run(conn, run_id, status="ok" if not t["errors"] else "partial",
@@ -384,6 +385,7 @@ def _rescreen(scope, trigger, log) -> dict:
     try:
         t = screen_roles(conn, ids + sorted(restore), log=log, restore_ids=restore, run_id=run_id)
     except Exception as e:
+        conn.rollback()
         db.finish_run(conn, run_id, status="error", log=str(e))
         conn.close()
         raise

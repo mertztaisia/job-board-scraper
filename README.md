@@ -2,7 +2,7 @@
 
 Everything lives in **`jobs.db`**, a SQLite file. By default it's in this folder; set `JOBS_DB` in `.env` to keep it elsewhere (recommended: outside OneDrive, see [Backups and where the database lives](#backups-and-where-the-database-lives)).
 Each role is stored with all its scraped metadata, its status, the date you applied, the path to the resume you used, notes and a status history.
-The scraper skips postings already in the database. The same posting on two job boards (same URL or employer link, or same title and company within 30 days) is one role. Boards often name the employer differently ("Amazon", "Amazon.com", "Amazon.com Services LLC"), so names are compared without case, punctuation, ".com" or legal endings like Inc and LLC, and one name may be the other plus more words, as long as the title and city match too; a repost or new opening after that gets its own row. When a later listing of a role you already have carries details the first one lacked (for example a description LinkedIn didn't return but ZipRecruiter did), they're filled in, never overwriting what's there, and the role is AI-screened again if it had no description to go on.
+The scraper skips postings already in the database. The same posting on two job boards (same URL or employer link, or same title and company within 30 days) is one role. Boards often name the employer differently ("Globex", "Globex.com", "Globex.com Services LLC"), so names are compared without case, punctuation, ".com" or legal endings like Inc and LLC, and one name may be the other plus more words, as long as the title and city match too; a repost or new opening after that gets its own row. When a later listing of a role you already have carries details the first one lacked (for example a description LinkedIn didn't return but ZipRecruiter did), they're filled in, never overwriting what's there, and the role is AI-screened again if it had no description to go on.
 
 ## 1. Run it (local deployment)
 The tracker is a small web service on your computer:
@@ -45,12 +45,14 @@ Settings go in `.env` and are all optional except the API key:
 | `JOBS_PORT` | `5055` | port |
 | `JOBS_HOST` | `127.0.0.1` | `127.0.0.1` = only this computer can connect |
 | `JOBS_DB` | `jobs.db` | database file location |
-| `JOBS_RESUME_DIR` | the `job applications` folder | where resume files are found |
+| `JOBS_RESUME_DIR` | `resumes` (inside `job_search`) | folder whose PDF/DOCX files appear in the resume picker; a relative path starts from `job_search` (`..` = the folder above). Only files in it can be opened from the app, so point it at your resumes, not your whole home folder |
 | `JOBS_BACKUP_DIR` | `%LOCALAPPDATA%\JobTracker\backups` | where daily database backups go |
-| `JOBS_ALLOWED_HOSTS` | — | extra host names the server answers to (only if you open it from another device) |
+| `JOBS_ALLOWED_HOSTS` | — | extra host names the server answers to (only if you open it from another device; see the warning below) |
 | `JOBS_THREADS` | `8` | web server worker threads |
 
 The server only answers requests addressed to `localhost` / `127.0.0.1`, and refuses changes sent from other websites, so a page you visit can't use the tracker behind your back.
+
+> **There is no login.** Setting `JOBS_HOST=0.0.0.0` and adding names to `JOBS_ALLOWED_HOSTS` lets every device on your network read and change your applications, notes and resumes and start paid AI screens. Only do that on a network you trust, and prefer a VPN or SSH tunnel to `127.0.0.1` instead.
 
 ### Backups and where the database lives
 - **Daily backups:** the server (and each pull) copies the database to `JOBS_BACKUP_DIR` once a day and keeps the last 14. Before a schema upgrade it also makes a `-before-upgrade` copy. Backups are written to a temp file first and moved in when complete, so it's safe to keep them in OneDrive.
@@ -122,7 +124,7 @@ Then create `.env` and run `service.ps1 install`.
 - **Click a role** to open its details:
   - set the status with one click
   - set the applied date
-  - pick the resume version you used (any PDF or DOCX in the `job applications` folder appears in the list)
+  - pick the resume version you used (any PDF or DOCX in the resume folder, `JOBS_RESUME_DIR`, appears in the list)
   - add notes
   - edit details
   - read the full description, with experience requirements highlighted

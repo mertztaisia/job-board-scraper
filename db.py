@@ -7,6 +7,7 @@ import copy
 import datetime as dt
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -18,7 +19,7 @@ import settings
 
 HERE = Path(__file__).resolve().parent
 DB_PATH = settings.DB_PATH
-BASE_DIR = settings.RESUME_DIR  # the "job applications" folder; resumes live here
+BASE_DIR = settings.RESUME_DIR  # resumes live here (job_search/resumes unless JOBS_RESUME_DIR is set)
 log = logging.getLogger("job-tracker.db")
 
 # A scraped posting with the same title + company as a role first seen within this
@@ -487,6 +488,23 @@ RESUME_EXTS = {".pdf", ".docx", ".doc", ".txt", ".md"}
 SKIP_DIRS = {".venv", "__pycache__", "node_modules", ".git", "results", "static", "tests", "logs"}
 
 
+def is_resume_file(path) -> bool:
+    """True if path is a file resume_files() would list, checked without walking the folder."""
+    try:
+        p = Path(path).resolve()
+        rel = p.relative_to(Path(BASE_DIR).resolve())
+    except (ValueError, OSError):
+        return False
+    if any(d in SKIP_DIRS or d.startswith(".") for d in rel.parts[:-1]):
+        return False
+    ext = p.suffix.lower()
+    if ext not in RESUME_EXTS:
+        return False
+    if ext in (".txt", ".md") and "resume" not in p.name.lower() and "cv" not in p.name.lower():
+        return False
+    return p.is_file()
+
+
 def resume_files() -> list[Path]:
     """Resume-like files under BASE_DIR, newest first. .txt/.md files count only if
     their name mentions resume or CV. /api/file serves nothing outside this list."""
@@ -733,14 +751,14 @@ def _clean(rec: dict) -> dict:
 
 
 # Legal and web endings that boards add to the same employer's name:
-# "Amazon", "Amazon.com", "Amazon.com Services LLC".
+# "Globex", "Globex.com", "Globex.com Services LLC".
 _COMPANY_ENDINGS = {"inc", "incorporated", "llc", "l l c", "ltd", "limited", "corp", "corporation",
                     "co", "company", "plc", "gmbh", "lp", "llp", "pbc", "sa", "ag", "bv", "nv"}
 
 
 def company_core(name) -> str:
     """A company name reduced for duplicate matching: lower case, '.com' and punctuation
-    dropped, legal endings removed. 'Amazon.com Services LLC' -> 'amazon services'."""
+    dropped, legal endings removed. 'Globex.com Services LLC' -> 'globex services'."""
     s = re.sub(r"\.(com|io|ai|net|org|co)\b", " ", str(name or "").lower())
     words = re.sub(r"[^\w&]+", " ", s).split()
     while words and words[-1] in _COMPANY_ENDINGS:
@@ -750,7 +768,7 @@ def company_core(name) -> str:
 
 def companies_match(a, b) -> bool:
     """Same employer as different boards name it: equal after company_core, or one name
-    is the other plus more words ('amazon' / 'amazon services'), never part of a word."""
+    is the other plus more words ('globex' / 'globex services'), never part of a word."""
     x, y = company_core(a), company_core(b)
     if not x or not y:
         return False
@@ -770,7 +788,7 @@ def find_existing(conn, title=None, company=None, job_url=None,
     """The role this posting duplicates, if any:
     - same job URL (or the employer's own link), at any age; else
     - same title and company first seen within `within_days` days (None = any age); else
-    - same title, the same employer under another name ("Amazon" / "Amazon.com Services
+    - same title, the same employer under another name ("Globex" / "Globex.com Services
       LLC") and the same city, within `within_days` days. Needs `location`."""
     for url in (job_url, job_url_direct):
         if url:
@@ -976,7 +994,7 @@ def check_role_changes(changes: dict) -> dict:
                 if isinstance(v, bool):
                     raise ValueError
                 num = float(v)
-                if num != num or num < 0:          # NaN or negative
+                if not math.isfinite(num) or num < 0:   # NaN, infinity or negative
                     raise ValueError
             except (TypeError, ValueError):
                 errors.append(f"{label} must be a number (0 or more).")
@@ -1310,15 +1328,64 @@ def _round_note(r: dict) -> str:
     return f"Step {r.get('round_number')}{f' ({kind})' if kind else ''}: {label}"
 
 
+ROUND_FIELDS = ("round_number", "kind", "scheduled_on", "status", "notes")
+
+
+def check_round(data: dict, new: bool) -> dict:
+    """Validate the step fields present in data (blank text becomes None). A new step
+    may leave the number and status blank (next number, "To do"); an edit can't clear
+    them. Raises ValueError listing every problem."""
+    out, errors = {}, []
+    for k in ROUND_FIELDS:
+        if k not in data:
+            continue
+        v = data[k]
+        if isinstance(v, str):
+            v = v.strip() or None
+        if v is None:
+            if not new and k in ("round_number", "status"):
+                errors.append(f"Step {'number' if k == 'round_number' else 'state'} can't be blank.")
+                continue
+        elif k == "round_number":
+            try:
+                if isinstance(v, bool) or float(v) != int(float(v)) or int(float(v)) < 1:
+                    raise ValueError
+                v = int(float(v))
+            except (TypeError, ValueError, OverflowError):
+                errors.append("Step number must be a whole number (1 or more).")
+                continue
+        elif k == "kind" and v not in ROUND_KINDS:
+            errors.append(f"Unknown step type '{v}'. Use one of: {', '.join(ROUND_KINDS)}.")
+            continue
+        elif k == "status" and v not in ROUND_STATUSES:
+            errors.append(f"Unknown step state '{v}'. Use one of: {', '.join(ROUND_STATUSES)}.")
+            continue
+        elif k == "scheduled_on":
+            try:
+                if not isinstance(v, str) or len(v) != 10:
+                    raise ValueError
+                v = dt.date.fromisoformat(v).isoformat()
+            except ValueError:
+                errors.append("Step date must be a date like 2026-11-21.")
+                continue
+        elif k == "notes" and not isinstance(v, str):
+            errors.append("Step notes must be text.")
+            continue
+        out[k] = v
+    if errors:
+        raise ValueError(" ".join(errors))
+    return out
+
+
 def add_round(conn, role_id: int, data: dict, log_history=True) -> int:
-    n = data.get("round_number")
+    clean = check_round(data, new=True)
+    n = clean.get("round_number")
     if not n:
         n = (conn.execute("SELECT MAX(round_number) FROM interview_rounds WHERE role_id=?",
                           (role_id,)).fetchone()[0] or 0) + 1
     ts = now_iso()
-    rec = {"round_number": int(n), "kind": data.get("kind") or None,
-           "scheduled_on": data.get("scheduled_on") or None,
-           "status": data.get("status") or "scheduled", "notes": data.get("notes") or None}
+    rec = {"round_number": n, "kind": clean.get("kind"), "scheduled_on": clean.get("scheduled_on"),
+           "status": clean.get("status") or "scheduled", "notes": clean.get("notes")}
     cur = conn.execute(
         "INSERT INTO interview_rounds(role_id, round_number, kind, scheduled_on, status, notes, "
         "created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)",
@@ -1334,12 +1401,21 @@ def add_round(conn, role_id: int, data: dict, log_history=True) -> int:
     return cur.lastrowid
 
 
+def _next_step(data: dict) -> dict:
+    """The "Got the next step" fields sent with a step update."""
+    nxt = data.get("next") or {}
+    if not isinstance(nxt, dict):
+        raise ValueError("next must be an object.")
+    return {k: v for k, v in nxt.items() if k in ROUND_FIELDS}
+
+
 def update_round(conn, round_id: int, data: dict):
     row = conn.execute("SELECT * FROM interview_rounds WHERE id=?", (round_id,)).fetchone()
     if not row:
         return None
-    fields = {k: (data[k] or None) for k in ("round_number", "kind", "scheduled_on", "status", "notes")
-              if k in data}
+    # Values sent back unchanged (the UI re-sends the step's type and date) aren't
+    # re-checked, so a step saved before these checks existed can still be edited.
+    fields = check_round({k: v for k, v in data.items() if k not in ROUND_FIELDS or v != row[k]}, new=False)
     if fields:
         fields["updated_at"] = now_iso()
         conn.execute(f"UPDATE interview_rounds SET {', '.join(f'{k}=?' for k in fields)} WHERE id=?",
@@ -1349,7 +1425,7 @@ def update_round(conn, round_id: int, data: dict):
         st = conn.execute("SELECT status FROM roles WHERE id=?", (row["role_id"],)).fetchone()["status"]
         add_history(conn, row["role_id"], st, _round_note(new))
     if data.get("create_next") and new.get("status") == "passed":
-        add_round(conn, row["role_id"], {**(data.get("next") or {}), "status": "scheduled"})
+        add_round(conn, row["role_id"], {**_next_step(data), "status": "scheduled"})
     conn.execute("UPDATE roles SET updated_at=? WHERE id=?", (now_iso(), row["role_id"]))
     return row["role_id"]
 
@@ -1364,9 +1440,40 @@ def delete_round(conn, round_id: int):
 # ----------------------------------------------------------------------------
 # Questions & answers
 # ----------------------------------------------------------------------------
+QA_STAGES = ("application", "interview")
+
+
+def _check_text(value, label):
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f"{label} must be text.")
+    return value
+
+
+def _check_round_of_role(conn, role_id: int, round_id):
+    """round_id as an int if it's one of this role's steps; None if blank. Raises ValueError
+    for a step that doesn't exist or belongs to another role."""
+    if round_id in (None, ""):
+        return None
+    try:
+        if isinstance(round_id, bool):
+            raise ValueError
+        rid = int(round_id)
+    except (TypeError, ValueError):
+        raise ValueError("Step id must be a number.") from None
+    row = conn.execute("SELECT role_id FROM interview_rounds WHERE id=?", (rid,)).fetchone()
+    if not row or row["role_id"] != role_id:
+        raise ValueError(f"Step {rid} isn't one of this role's steps.")
+    return rid
+
+
 def add_qa(conn, role_id: int, question: str, answer: str = "", round_id=None, stage=None):
+    _check_text(question, "Question")
+    _check_text(answer, "Answer")
     if not (question or "").strip():
         return None
+    round_id = _check_round_of_role(conn, role_id, round_id)
+    if stage is not None and stage not in QA_STAGES:
+        raise ValueError(f"Unknown question stage '{stage}'. Use one of: {', '.join(QA_STAGES)}.")
     cur = conn.execute(
         "INSERT INTO role_qa(role_id, round_id, stage, question, answer, created_at) VALUES(?,?,?,?,?,?)",
         (role_id, round_id, stage or ("interview" if round_id else "application"),
@@ -1379,6 +1486,17 @@ def update_qa(conn, qa_id: int, data: dict):
     if not row:
         return None
     fields = {k: data[k] for k in ("question", "answer", "round_id", "stage") if k in data}
+    if "question" in fields:
+        _check_text(fields["question"], "Question")
+        fields["question"] = (fields["question"] or "").strip()
+        if not fields["question"]:
+            raise ValueError("Question can't be blank.")
+    if "answer" in fields:
+        fields["answer"] = (_check_text(fields["answer"], "Answer") or "").strip() or None
+    if "round_id" in fields:
+        fields["round_id"] = _check_round_of_role(conn, row["role_id"], fields["round_id"])
+    if "stage" in fields and fields["stage"] not in QA_STAGES:
+        raise ValueError(f"Unknown question stage '{fields['stage']}'. Use one of: {', '.join(QA_STAGES)}.")
     if fields:
         conn.execute(f"UPDATE role_qa SET {', '.join(f'{k}=?' for k in fields)} WHERE id=?",
                      list(fields.values()) + [qa_id])
@@ -1415,14 +1533,19 @@ def transition(conn, role_id: int, data: dict) -> dict | None:
     round_id = None
     rnd = data.get("round")
     if rnd:
+        if not isinstance(rnd, dict):
+            raise ValueError("round must be an object.")
         if rnd.get("id"):
-            update_round(conn, int(rnd["id"]), rnd)
-            round_id = int(rnd["id"])
+            round_id = _check_round_of_role(conn, role_id, rnd["id"])
+            update_round(conn, round_id, rnd)
         else:
             round_id = add_round(conn, role_id, rnd)
             if rnd.get("create_next") and rnd.get("status") == "passed":
-                add_round(conn, role_id, {**(rnd.get("next") or {}), "status": "scheduled"})
-    for qa in data.get("qa") or []:
+                add_round(conn, role_id, {**_next_step(rnd), "status": "scheduled"})
+    qas = data.get("qa") or []
+    if not isinstance(qas, list) or not all(isinstance(q, dict) for q in qas):
+        raise ValueError("qa must be a list of {question, answer} objects.")
+    for qa in qas:
         add_qa(conn, role_id, qa.get("question"), qa.get("answer"),
                round_id=qa.get("round_id") or round_id,
                stage="interview" if (qa.get("round_id") or round_id) else "application")

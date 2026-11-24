@@ -308,20 +308,31 @@ def archive(rid):
     return jsonify(r) if r else abort(404)
 
 
+def _write(fn):
+    """Run fn(c) in a transaction; a ValueError (bad input) saves nothing and is a 400."""
+    try:
+        with conn() as c:
+            return fn(c)
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+
+
 @app.post("/api/roles/<int:rid>/rounds")
 def add_round(rid):
-    with conn() as c:
+    def go(c):
         if not db.role_exists(c, rid):
             abort(404)
         db.add_round(c, rid, body())
         return _role_or_404(c, rid)
+    return _write(go)
 
 
 @app.patch("/api/rounds/<int:round_id>")
 def patch_round(round_id):
-    with conn() as c:
+    def go(c):
         rid = db.update_round(c, round_id, body())
         return _role_or_404(c, rid) if rid else abort(404)
+    return _write(go)
 
 
 @app.delete("/api/rounds/<int:round_id>")
@@ -335,19 +346,24 @@ def del_round(round_id):
 def add_qa(rid):
     data = body()
     items = data.get("items") or [data]
-    with conn() as c:
+    if not isinstance(items, list) or not all(isinstance(q, dict) for q in items):
+        return jsonify(error="items must be a list of {question, answer} objects."), 400
+
+    def go(c):
         if not db.role_exists(c, rid):
             abort(404)
         for q in items:
             db.add_qa(c, rid, q.get("question"), q.get("answer"), q.get("round_id"))
         return _role_or_404(c, rid)
+    return _write(go)
 
 
 @app.patch("/api/qa/<int:qa_id>")
 def patch_qa(qa_id):
-    with conn() as c:
+    def go(c):
         rid = db.update_qa(c, qa_id, body())
         return _role_or_404(c, rid) if rid else abort(404)
+    return _write(go)
 
 
 @app.delete("/api/qa/<int:qa_id>")
@@ -548,10 +564,10 @@ def resumes():
 def open_file():
     """Open a resume file. Only files listed by /api/resumes are served, so this
     can't be used to read .env, the database or anything else on disk."""
-    p = Path(request.args.get("path", "")).resolve()
-    if p not in {f.resolve() for f in db.resume_files()}:
+    p = Path(request.args.get("path", ""))
+    if not request.args.get("path") or not db.is_resume_file(p):
         abort(403)
-    return send_file(p)
+    return send_file(p.resolve())
 
 
 if __name__ == "__main__":

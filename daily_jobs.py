@@ -181,7 +181,13 @@ def fill_zip_descriptions(jobs: list[dict], log=print, fetch=None, sleep=time.sl
     stats = {"tried": 0, "fetched": 0, "stopped_early": False}
     if not jobs:
         return stats
-    fetch = fetch or _zip_fetcher()
+    if fetch is None:
+        try:
+            fetch = _zip_fetcher()
+        except Exception as e:  # JobSpy internals changed: skip this step, don't fail the pull
+            log(f"  ! Couldn't set up ZipRecruiter description fetching ({type(e).__name__}: {e}); skipped")
+            stats["error"] = f"{type(e).__name__}: {e}"
+            return stats
     log(f"Fetching {len(jobs)} missing ZipRecruiter description(s), a few seconds apart...")
     streak = 0
     for i, job in enumerate(jobs):
@@ -281,9 +287,7 @@ def salary_range(job: dict) -> tuple[float, float] | None:
     lo, hi = job.get("min_amount"), job.get("max_amount")
     if lo or hi:
         mult = INTERVAL_MULT.get((job.get("interval") or "yearly").lower(), 1)
-        lo = float(lo or hi) * mult
-        hi = float(hi or lo) * mult
-        return lo, hi
+        return float(lo or hi) * mult, float(hi or lo) * mult
     desc = (job.get("description") or "").replace("\\", "")
     m = SAL_RE.search(desc)
     if m:
@@ -315,7 +319,7 @@ def _parse_place(s: str) -> tuple[str, str]:
 
 def location_ok(job: dict, prefs: dict) -> tuple[bool, str]:
     loc = job.get("location") or ""
-    parts = [p.strip() for p in loc.split(",")]
+    parts = [p.strip() for p in loc.split(",") if p.strip()]
     if job.get("is_remote") or "remote" in loc.lower():
         us = (not parts or any(p.lower() in ("usa", "us", "united states", "remote") for p in parts)
               or (len(parts) > 1 and parts[1].lower() in US_STATES))
@@ -580,6 +584,7 @@ def _run(reuse, ignore_seen, use_ai, trigger, log) -> dict:
                       ai_unsure=ai["unsure"], ai_input_tokens=ai["input_tokens"],
                       ai_output_tokens=ai["output_tokens"], ai_cost=ai["cost"])
     except Exception as e:
+        conn.rollback()   # don't keep half-written roles from the failed pull
         db.finish_run(conn, run_id, status="error", log=str(e))
         raise
     finally:

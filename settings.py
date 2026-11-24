@@ -5,7 +5,8 @@ Runtime configuration, read from environment variables or job_search/.env.
   JOBS_HOST           interface to listen on (default 127.0.0.1 = this computer only)
   JOBS_PORT           port (default 5055)
   JOBS_DB             path to the SQLite database (default job_search/jobs.db)
-  JOBS_RESUME_DIR     folder scanned for resume files (default: the "job applications" folder)
+  JOBS_RESUME_DIR     folder scanned for resume files (default job_search/resumes; a relative
+                      path is taken from the job_search folder, e.g. ".." for the folder above)
   JOBS_THREADS        web server worker threads (default 8)
   JOBS_BACKUP_DIR     folder for daily database backups (default %LOCALAPPDATA%/JobTracker/backups,
                       which is outside OneDrive)
@@ -42,7 +43,9 @@ HOST = os.environ.get("JOBS_HOST", "127.0.0.1")
 PORT = int(os.environ.get("JOBS_PORT", "5055"))
 THREADS = int(os.environ.get("JOBS_THREADS", "8"))
 DB_PATH = Path(os.environ.get("JOBS_DB") or HERE / "jobs.db")
-RESUME_DIR = Path(os.environ.get("JOBS_RESUME_DIR") or HERE.parent)
+# Only this folder (and its subfolders) is offered in the resume picker and served by
+# /api/file, so keep it to your resumes rather than a whole home folder.
+RESUME_DIR = (HERE / (os.environ.get("JOBS_RESUME_DIR") or "resumes")).resolve()
 LOG_DIR = HERE / "logs"
 BACKUP_DIR = Path(os.environ.get("JOBS_BACKUP_DIR")
                   or Path(os.environ.get("LOCALAPPDATA") or HERE) / "JobTracker" / "backups")

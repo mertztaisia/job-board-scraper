@@ -64,10 +64,12 @@ def build(conn, weeks: int = 12) -> dict:
     def week_i(d):
         return index.get(_monday(d)) if d else None
 
-    # Archived roles are left out everywhere, matching the rest of the app.
+    # Archived roles are left out of the backlog, new-role and funnel numbers, matching the
+    # rest of the app. Applications still count after you archive the role: you did apply
+    # that week, and archiving a rejection shouldn't lower your weekly totals or streak.
     live = "COALESCE(archived,0)=0"
     applied_rows = conn.execute(
-        f"SELECT applied_at, date_posted, ai_match FROM roles WHERE {live} AND applied_at IS NOT NULL").fetchall()
+        "SELECT applied_at, date_posted, ai_match FROM roles WHERE applied_at IS NOT NULL").fetchall()
     applied_weeks: dict[dt.date, int] = {}   # all history, for the streak
     for r in applied_rows:
         a = _as_date(r["applied_at"])
