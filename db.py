@@ -821,7 +821,7 @@ def find_existing(conn, title=None, company=None, job_url=None,
     return None
 
 
-def fill_blanks(conn, role_id: int, rec: dict) -> list[str]:
+def fill_blanks(conn, role_id: int, rec: dict, note: str | None = None) -> list[str]:
     """Copy fields from another listing of the same posting into a role, only where the
     role has nothing yet (never overwrites). Returns the names of the fields filled."""
     row = conn.execute("SELECT * FROM roles WHERE id=?", (role_id,)).fetchone()
@@ -837,7 +837,7 @@ def fill_blanks(conn, role_id: int, rec: dict) -> list[str]:
         names = [k for k in filled if k != "updated_at"]
         if "description" in names:
             add_history(conn, role_id, row["status"],
-                        f"Description added from another listing ({new.get('site') or 'scrape'})")
+                        note or f"Description added from another listing ({new.get('site') or 'scrape'})")
         return names
     return []
 
@@ -1123,11 +1123,14 @@ def tag_condition(tag: str) -> tuple[str, list]:
             [f'%"{tag}"%', word, word])
 
 
-# Roles in "Not a fit" because the AI screen put them there (not because you did):
-# the latest change to Not a fit was recorded with source='ai'.
+# Roles in "Not a fit" because the AI screen put them there (not because you did): the
+# entry that moved the role into Not a fit (its first Not a fit entry after the last entry
+# with any other status) was recorded with source='ai'. Later notes on the role (a
+# description added, archived, a step) are logged with its current status and don't count.
 AI_REJECTED_SQL = ("(roles.status='not_a_fit' AND (SELECT h.source FROM status_history h "
-                   "WHERE h.role_id=roles.id AND h.status='not_a_fit' ORDER BY h.id DESC LIMIT 1) "
-                   "IS 'ai')")
+                   "WHERE h.role_id=roles.id AND h.status='not_a_fit' AND h.id > COALESCE("
+                   "(SELECT MAX(o.id) FROM status_history o WHERE o.role_id=roles.id AND o.status!='not_a_fit'), 0) "
+                   "ORDER BY h.id LIMIT 1) IS 'ai')")
 
 
 def list_roles(conn, q="", statuses=None, remote=False, paid=False, tags=None,

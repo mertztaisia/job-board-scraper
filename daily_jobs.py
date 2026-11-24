@@ -148,7 +148,7 @@ def fetch_jobs(prefs: dict, log=print, stats: dict | None = None) -> list[dict]:
 
 
 # ----------------------------------------------------------------------------
-# ZipRecruiter descriptions
+# Missing descriptions (ZipRecruiter during pulls; ZipRecruiter and LinkedIn on request)
 # ----------------------------------------------------------------------------
 # JobSpy fetches every ZipRecruiter job page back to back; after about 20 requests
 # ZipRecruiter starts refusing them, and the rest of the jobs come back with no
@@ -173,26 +173,64 @@ def _zip_fetcher():
     return lambda job: zr._fetch_details(job.get("id"), job["job_url"])
 
 
-def fill_zip_descriptions(jobs: list[dict], log=print, fetch=None, sleep=time.sleep) -> dict:
-    """Fetch missing descriptions for these ZipRecruiter listings, a few seconds apart,
-    backing off when ZipRecruiter refuses and stopping after ZIP_MAX_FAILURES refusals
-    in a row. Updates the listings in place. Returns {"tried", "fetched", "stopped_early"}."""
-    jobs = jobs[:ZIP_MAX_FETCHES]
+def linkedin_job_id(url) -> str | None:
+    """'https://www.linkedin.com/jobs/view/4123456789' (or '.../view/some-title-4123456789/') -> '4123456789'."""
+    m = re.search(r"linkedin\.com/jobs/view/(?:[\w%-]*-)?(\d{5,})", str(url or ""))
+    return m.group(1) if m else None
+
+
+def _linkedin_fetcher():
+    """A function listing -> details dict, using JobSpy's own LinkedIn job-page parser."""
+    from jobspy.linkedin import LinkedIn
+    from jobspy.linkedin.constant import headers
+    from jobspy.model import DescriptionFormat, ScraperInput
+    from jobspy.util import RequestsRotating, create_session
+    li = LinkedIn()
+    li.scraper_input = ScraperInput(fetch_description=True, description_format=DescriptionFormat.MARKDOWN)
+    li.session = create_session(RequestsRotating(None, clear_cookies=True), li.scraper_input, headers)
+    li.warn = lambda msg: None            # failures show up as an empty result
+
+    def fetch(job):
+        job_id = linkedin_job_id(job.get("job_url"))
+        return li._fetch_details(job_id) if job_id else {}
+    return fetch
+
+
+LINKEDIN_PAUSE = (3.0, 7.0)   # seconds between LinkedIn job pages (JobSpy's own pace)
+BACKFILL_MAX_PER_SITE = 100   # "Fetch missing descriptions": at most this many pages per board per run
+
+
+def _description_sites() -> dict:
+    """Boards whose job pages can be fetched again for a missing description. Looked up
+    when called, so tests can swap the fetchers and pauses."""
+    return {
+        "zip_recruiter": {"label": "ZipRecruiter", "make_fetcher": _zip_fetcher, "pause": ZIP_PAUSE},
+        "linkedin": {"label": "LinkedIn", "make_fetcher": _linkedin_fetcher, "pause": LINKEDIN_PAUSE},
+    }
+
+
+def fill_descriptions(jobs: list[dict], label: str, make_fetcher, pause, limit: int,
+                      log=print, fetch=None, sleep=time.sleep) -> dict:
+    """Fetch missing descriptions for these listings from one board, a few seconds apart,
+    backing off when the board refuses and stopping after ZIP_MAX_FAILURES refusals in a
+    row. Updates the listings in place. Returns {"tried", "fetched", "stopped_early"}
+    (plus "error" if the fetcher couldn't be set up)."""
+    jobs = jobs[:limit]
     stats = {"tried": 0, "fetched": 0, "stopped_early": False}
     if not jobs:
         return stats
     if fetch is None:
         try:
-            fetch = _zip_fetcher()
-        except Exception as e:  # JobSpy internals changed: skip this step, don't fail the pull
-            log(f"  ! Couldn't set up ZipRecruiter description fetching ({type(e).__name__}: {e}); skipped")
+            fetch = make_fetcher()
+        except Exception as e:  # JobSpy internals changed: skip this step, don't fail the run
+            log(f"  ! Couldn't set up {label} description fetching ({type(e).__name__}: {e}); skipped")
             stats["error"] = f"{type(e).__name__}: {e}"
             return stats
-    log(f"Fetching {len(jobs)} missing ZipRecruiter description(s), a few seconds apart...")
+    log(f"Fetching {len(jobs)} missing {label} description(s), a few seconds apart...")
     streak = 0
     for i, job in enumerate(jobs):
         if i:
-            sleep(random.uniform(*ZIP_PAUSE))
+            sleep(random.uniform(*pause))
         stats["tried"] += 1
         try:
             details = fetch(job) or {}
@@ -208,52 +246,95 @@ def fill_zip_descriptions(jobs: list[dict], log=print, fetch=None, sleep=time.sl
         streak += 1
         if streak >= ZIP_MAX_FAILURES:
             stats["stopped_early"] = True
-            log(f"  ! ZipRecruiter kept refusing; stopped after {stats['tried']} (run `jobs.py descriptions` later)")
+            log(f"  ! {label} kept refusing; stopped after {stats['tried']} (try again later)")
             break
         sleep(ZIP_BACKOFF * streak)
-    log(f"  got {stats['fetched']} of {stats['tried']} ZipRecruiter description(s)")
+    log(f"  got {stats['fetched']} of {stats['tried']} {label} description(s)")
     return stats
 
 
-def backfill_zip_descriptions(use_ai=True, trigger="cli", log=print) -> dict:
-    """Fetch descriptions for ZipRecruiter roles already in the tracker that have none
-    (not archived), then AI-screen the ones that only now have something to go on
-    (not screened or "unknown", or marked Not a fit by the AI). Raises db.RunInProgress
-    if a pull or re-screen is running."""
+def fill_zip_descriptions(jobs: list[dict], log=print, fetch=None, sleep=time.sleep) -> dict:
+    """fill_descriptions for ZipRecruiter listings during a pull (at most ZIP_MAX_FETCHES)."""
+    return fill_descriptions(jobs, "ZipRecruiter", _zip_fetcher, ZIP_PAUSE, ZIP_MAX_FETCHES,
+                             log=log, fetch=fetch, sleep=sleep)
+
+
+def missing_description_where(open_only: bool) -> str:
+    """SQL condition for roles with no description; open_only leaves out Not a fit and archived roles."""
+    sql = "(description IS NULL OR TRIM(description)='')"
+    if open_only:
+        sql += " AND COALESCE(archived,0)=0 AND status!='not_a_fit'"
+    return sql
+
+
+def missing_descriptions(conn, open_only: bool) -> dict:
+    """How many roles have no description: {"total", "fetchable", "by_site": {site: n}}.
+    Fetchable = on a board whose job page can be fetched again (see _description_sites)."""
+    sites = _description_sites()
+    by_site = {r["site"] or "manual": r["n"] for r in conn.execute(
+        f"SELECT site, COUNT(*) n FROM roles WHERE {missing_description_where(open_only)} GROUP BY site")}
+    fetchable = conn.execute(
+        f"SELECT COUNT(*) FROM roles WHERE {missing_description_where(open_only)} AND job_url IS NOT NULL "
+        f"AND site IN ({', '.join('?' * len(sites))})", list(sites)).fetchone()[0]
+    return {"total": sum(by_site.values()), "fetchable": fetchable, "by_site": by_site}
+
+
+def backfill_descriptions(use_ai=True, open_only=True, trigger="cli", log=print) -> dict:
+    """Fetch descriptions for roles already in the tracker that have none, from the boards
+    that allow it (ZipRecruiter, LinkedIn), then, with use_ai, AI-screen every role that got
+    one (a role the AI had marked Not a fit goes back to Not applied if it now fits).
+    open_only leaves out Not a fit and archived roles. Recorded in the run history as a
+    "descriptions" run. Raises db.RunInProgress if a pull or re-screen is running."""
     with db.run_lock():
         conn = db.connect()
+        run_id = db.start_run(conn, kind="descriptions", trigger=trigger)
         try:
-            rows = conn.execute(
-                "SELECT id, job_url FROM roles WHERE site='zip_recruiter' AND job_url IS NOT NULL "
-                "AND (description IS NULL OR TRIM(description)='') AND COALESCE(archived,0)=0 "
-                "ORDER BY id DESC").fetchall()
-            listings = [{"role_id": r["id"], "id": f"role {r['id']}", "job_url": r["job_url"]} for r in rows]
-            stats = fill_zip_descriptions(listings, log)
-            got = []
-            for job in listings:
-                if job.get("description"):
-                    rec = {k: v for k, v in job.items() if k in db.ROLE_FIELDS}
-                    if "description" in db.fill_blanks(conn, job["role_id"], rec):
+            sites = _description_sites()
+            rows = conn.execute(f"SELECT id, site, job_url FROM roles WHERE {missing_description_where(open_only)} "
+                                "ORDER BY id DESC").fetchall()
+            by_site: dict[str, list[dict]] = {}
+            for r in rows:
+                if r["site"] in sites and r["job_url"]:
+                    by_site.setdefault(r["site"], []).append(
+                        {"role_id": r["id"], "id": f"role {r['id']}", "job_url": r["job_url"]})
+            fetchable = sum(len(v) for v in by_site.values())
+            log(f"{len(rows)} {'open ' if open_only else ''}role(s) without a description; "
+                f"{fetchable} can be fetched again from the job board "
+                f"({', '.join(cfg['label'] for cfg in sites.values())}).")
+            per_site, got = {}, []
+            for site, listings in by_site.items():
+                cfg = sites[site]
+                per_site[site] = fill_descriptions(listings, cfg["label"], cfg["make_fetcher"], cfg["pause"],
+                                                   BACKFILL_MAX_PER_SITE, log=log)
+                for job in listings:
+                    desc = job.get("description")
+                    if isinstance(desc, str) and desc.strip() and \
+                            "description" in db.fill_blanks(conn, job["role_id"], {"description": desc},
+                                                 note=f"Description fetched from the {cfg['label']} job page"):
                         got.append(job["role_id"])
-            conn.commit()
-            to_screen, restore = [], set()
-            for rid in got:
-                r = conn.execute("SELECT status, ai_match FROM roles WHERE id=?", (rid,)).fetchone()
-                if r["status"] == "not_applied" and r["ai_match"] in (None, "unknown"):
-                    to_screen.append(rid)
-                elif db.last_change_by_ai(conn, rid):
-                    to_screen.append(rid)
-                    restore.add(rid)
+                conn.commit()   # keep each board's descriptions even if a later step fails
             ai = None
-            if use_ai and to_screen:
+            if got and use_ai:
                 import ai_screen
-                run_id = db.start_run(conn, kind="rescreen", trigger=trigger)
-                ai = ai_screen.screen_roles(conn, to_screen, log=log, restore_ids=restore, run_id=run_id)
-                db.finish_run(conn, run_id, status="ok" if not ai["errors"] else "partial",
-                              ai_screened=ai["screened"], ai_rejected=ai["rejected"], ai_unsure=ai["unsure"],
-                              ai_input_tokens=ai["input_tokens"], ai_output_tokens=ai["output_tokens"],
-                              ai_cost=ai["cost"])
-            return {"missing": len(listings), **stats, "described": got, "ai": ai}
+                restore = {rid for rid in got if db.last_change_by_ai(conn, rid)}
+                ai = ai_screen.screen_roles(conn, got, log=log, restore_ids=restore, run_id=run_id)
+            elif got:
+                log("AI assessment is off for this run, so the fit of these roles wasn't updated.")
+            tried = sum(s["tried"] for s in per_site.values())
+            fetched = sum(s["fetched"] for s in per_site.values())
+            db.finish_run(conn, run_id, status="partial" if ai and ai["errors"] else "ok",
+                          scraped=len(rows), kept=tried, added=len(got),
+                          **({"ai_screened": ai["screened"], "ai_rejected": ai["rejected"], "ai_unsure": ai["unsure"],
+                              "ai_input_tokens": ai["input_tokens"], "ai_output_tokens": ai["output_tokens"],
+                              "ai_cost": ai["cost"]} if ai else {}))
+            return {"missing": len(rows), "fetchable": fetchable, "unsupported": len(rows) - fetchable,
+                    "tried": tried, "fetched": fetched, "sites": per_site, "described": got, "ai": ai,
+                    "open_only": open_only, "use_ai": use_ai,
+                    "stopped_early": any(s["stopped_early"] for s in per_site.values())}
+        except Exception as e:
+            conn.rollback()
+            db.finish_run(conn, run_id, status="error", log=str(e))
+            raise
         finally:
             conn.close()
 

@@ -500,6 +500,10 @@ def _worker(kind, opts):
         if kind == "pull":
             import daily_jobs
             TASK["result"] = daily_jobs.run(trigger="ui", log=_log)
+        elif kind == "descriptions":
+            import daily_jobs
+            TASK["result"] = daily_jobs.backfill_descriptions(
+                use_ai=opts.get("use_ai", True), open_only=opts.get("open_only", True), trigger="ui", log=_log)
         else:
             import ai_screen
             TASK["result"] = {"ai": ai_screen.rescreen(scope=opts.get("scope", "unscreened"),
@@ -535,6 +539,26 @@ def start_scrape():
 def start_rescreen():
     data = body()
     return _start("rescreen", {"scope": data.get("scope", "unscreened")})
+
+
+@app.get("/api/descriptions")
+def missing_descriptions():
+    """How many roles have no description (open roles only, and all), and how many of
+    those can be fetched again from their job board."""
+    import daily_jobs
+    with conn() as c:
+        return jsonify(open=daily_jobs.missing_descriptions(c, open_only=True),
+                       all=daily_jobs.missing_descriptions(c, open_only=False))
+
+
+@app.post("/api/descriptions")
+def start_descriptions():
+    """Fetch missing descriptions for roles you already have; body {use_ai, open_only} (both default true)."""
+    data = body()
+    opts = {k: data.get(k, True) for k in ("use_ai", "open_only")}
+    if not all(isinstance(v, bool) for v in opts.values()):
+        return jsonify(error="use_ai and open_only must be true or false."), 400
+    return _start("descriptions", opts)
 
 
 @app.get("/api/scrape")

@@ -953,7 +953,7 @@ class ZipRecruiterDescriptionTests(TempDB):
         daily_jobs._zip_fetcher = lambda: (lambda j: {"description": "Backfilled"})
         daily_jobs.ZIP_PAUSE = (0, 0)
         try:
-            r = daily_jobs.backfill_zip_descriptions(use_ai=False, log=lambda *_: None)
+            r = daily_jobs.backfill_descriptions(use_ai=False, log=lambda *_: None)
         finally:
             daily_jobs._zip_fetcher, daily_jobs.ZIP_PAUSE = saved, pause
         self.assertEqual((r["missing"], r["described"]), (1, [rid]))
@@ -1073,6 +1073,105 @@ class ReviewFixTests(TempDB):
         self.assertEqual(out["progress"]["applications_this_week"], 1)
         self.assertEqual(out["applying"]["total"], 1)
         self.assertEqual({s["stage"]: s["count"] for s in out["funnel"]}["Tracked"], 0)
+
+
+class FetchMissingDescriptionsTests(TempDB):
+    """Pull new roles ▾ → Fetch missing descriptions (no network: fetchers are swapped)."""
+
+    def setUp(self):
+        super().setUp()
+        self.saved = (daily_jobs._zip_fetcher, daily_jobs._linkedin_fetcher, daily_jobs.ZIP_PAUSE, daily_jobs.LINKEDIN_PAUSE)
+        self.fetched = []
+        fake = lambda: (lambda j: self.fetched.append(j["job_url"]) or {"description": f"Text for {j['job_url']}",
+                                                                          "job_type": ["not a column value"]})
+        daily_jobs._zip_fetcher = daily_jobs._linkedin_fetcher = fake
+        daily_jobs.ZIP_PAUSE = daily_jobs.LINKEDIN_PAUSE = (0, 0)
+        add = lambda **kw: db.upsert_role(self.conn, job(description=None, **kw))[0]
+        self.open_li = add(site="linkedin", job_url="https://www.linkedin.com/jobs/view/1111111", title="A Engineer")
+        self.open_zip = add(site="zip_recruiter", job_url="https://zip/open", title="B Engineer")
+        self.indeed = add(site="indeed", job_url="https://indeed.com/9", title="C Engineer")
+        self.nafit = add(site="linkedin", job_url="https://www.linkedin.com/jobs/view/2222222", title="D Engineer")
+        db.update_role(self.conn, self.nafit, {"status": "not_a_fit"}, note="AI screen: too senior", source="ai")
+        self.archived = add(site="zip_recruiter", job_url="https://zip/archived", title="E Engineer")
+        db.set_archived(self.conn, self.archived, True)
+        self.has_desc = db.upsert_role(self.conn, job(site="linkedin", job_url="https://www.linkedin.com/jobs/view/3333333",
+                                                      title="F Engineer"))[0]
+        self.conn.commit()
+
+    def tearDown(self):
+        daily_jobs._zip_fetcher, daily_jobs._linkedin_fetcher, daily_jobs.ZIP_PAUSE, daily_jobs.LINKEDIN_PAUSE = self.saved
+        super().tearDown()
+
+    def desc(self, rid):
+        return db.get_role(self.conn, rid)["description"]
+
+    def test_counts(self):
+        self.assertEqual(daily_jobs.missing_descriptions(self.conn, True),
+                         {"total": 3, "fetchable": 2, "by_site": {"linkedin": 1, "zip_recruiter": 1, "indeed": 1}})
+        self.assertEqual(daily_jobs.missing_descriptions(self.conn, False)["fetchable"], 4)
+
+    def test_open_roles_only_by_default_and_ai_off(self):
+        r = daily_jobs.backfill_descriptions(use_ai=False, log=lambda *_: None)
+        self.assertEqual(sorted(r["described"]), sorted([self.open_li, self.open_zip]))
+        self.assertEqual((r["missing"], r["unsupported"], r["ai"]), (3, 1, None))
+        self.assertTrue(self.desc(self.open_li).startswith("Text for"))
+        self.assertIsNone(self.desc(self.nafit))
+        self.assertIsNone(self.desc(self.archived))
+        self.assertIsNone(self.desc(self.indeed))
+        self.assertNotIn("https://www.linkedin.com/jobs/view/3333333", self.fetched)   # already had one
+        run = self.conn.execute("SELECT kind, status, scraped, added FROM scrape_runs ORDER BY id DESC").fetchone()
+        self.assertEqual(tuple(run), ("descriptions", "ok", 3, 2))
+
+    def test_all_roles_with_ai(self):
+        import ai_screen
+        calls = []
+        orig = ai_screen.screen_roles
+        ai_screen.screen_roles = lambda conn, ids, **kw: calls.append((sorted(ids), kw["restore_ids"])) or {
+            "screened": len(ids), "rejected": 0, "unsure": 0, "restored": 0, "errors": 0,
+            "input_tokens": 10, "output_tokens": 5, "cost": 0.001, "skipped": None}
+        try:
+            r = daily_jobs.backfill_descriptions(use_ai=True, open_only=False, log=lambda *_: None)
+        finally:
+            ai_screen.screen_roles = orig
+        everyone = sorted([self.open_li, self.open_zip, self.nafit, self.archived])
+        self.assertEqual(sorted(r["described"]), everyone)
+        self.assertEqual(calls, [(everyone, {self.nafit})])     # the AI-rejected one may come back
+        self.assertEqual(self.conn.execute("SELECT ai_cost FROM scrape_runs ORDER BY id DESC").fetchone()[0], 0.001)
+
+    def test_later_notes_keep_an_ai_rejection_an_ai_rejection(self):
+        self.assertTrue(db.last_change_by_ai(self.conn, self.nafit))
+        db.fill_blanks(self.conn, self.nafit, {"description": "now it has one"})
+        db.set_archived(self.conn, self.nafit, True)
+        self.assertTrue(db.last_change_by_ai(self.conn, self.nafit))
+        db.update_role(self.conn, self.nafit, {"status": "not_applied"})
+        db.update_role(self.conn, self.nafit, {"status": "not_a_fit"}, note="not for me")   # you, this time
+        self.assertFalse(db.last_change_by_ai(self.conn, self.nafit))
+
+    def test_history_says_where_the_description_came_from(self):
+        daily_jobs.backfill_descriptions(use_ai=False, log=lambda *_: None)
+        self.assertEqual(db.get_role(self.conn, self.open_li)["history"][0]["note"],
+                         "Description fetched from the LinkedIn job page")
+
+    def test_linkedin_job_id(self):
+        self.assertEqual(daily_jobs.linkedin_job_id("https://www.linkedin.com/jobs/view/4123456789/?trk=x"), "4123456789")
+        self.assertEqual(daily_jobs.linkedin_job_id("https://www.linkedin.com/jobs/view/dev-at-acme-4123456789"), "4123456789")
+        self.assertIsNone(daily_jobs.linkedin_job_id("https://indeed.com/viewjob?jk=1"))
+
+    def test_api(self):
+        import app
+        client = app.app.test_client()
+        d = client.get("/api/descriptions").get_json()
+        self.assertEqual((d["open"]["fetchable"], d["all"]["fetchable"]), (2, 4))
+        self.assertEqual(client.post("/api/descriptions", json={"use_ai": "yes"}).status_code, 400)
+        seen = {}
+        orig = daily_jobs.backfill_descriptions
+        daily_jobs.backfill_descriptions = lambda **kw: seen.update(kw) or {"described": []}
+        try:
+            app._worker("descriptions", {"use_ai": False, "open_only": True})
+        finally:
+            daily_jobs.backfill_descriptions = orig
+        self.assertEqual((seen["use_ai"], seen["open_only"], seen["trigger"]), (False, True, "ui"))
+        self.assertEqual(app.TASK["result"], {"described": []})
 
 
 if __name__ == "__main__":

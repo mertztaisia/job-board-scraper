@@ -84,6 +84,7 @@ Then create `.env` and run `service.ps1 install`.
 
 ## Using the UI
 - **Pull new roles** (top right) scrapes the job boards using your saved preferences, adds new matches as **Not applied**, then has Claude screen them. It asks for confirmation first, because the AI screen costs money (about $0.0005 per role with Haiku 5.5). Tick **Don't show this again** to skip that step in this browser; turn **Ask before each pull** back on in Preferences → AI screening. A run takes about 2-5 minutes. Only one pull or re-screen runs at a time, including the daily scheduled one; starting a second shows a message instead. When it finishes, a summary shows how many searches ran, postings found per board, how many were already tracked (and which got missing details filled in), why the rest were filtered out, how many new roles were added, and what the AI screen did and cost.
+- **Pull new roles ▾ → Fetch missing descriptions** re-reads the job page of roles you already have that came without a description (LinkedIn and ZipRecruiter; other boards' pages can't be re-read, so add those by hand). The dialog shows how many roles are missing one and has two switches: **Assess with AI** (on by default) screens every role that gets a description, and a role the AI had marked Not a fit goes back to Not applied if it now fits; **Only open roles** (on by default) leaves out Not a fit and archived roles. Pages are fetched a few seconds apart, at most 100 per board per run, stopping early if a board keeps refusing; run it again later for the rest. It shows up in the pull history as a Descriptions run.
 - **Preferences:** click the logo and choose Preferences to edit:
   - search terms, locations, experience and pay
   - employment type, title and company filters
@@ -128,7 +129,7 @@ Then create `.env` and run `service.ps1 install`.
   - add notes
   - edit details
   - read the full description, with experience requirements highlighted
-  - add or edit the description yourself (**+ Add description** / **Edit**) when the scrape didn't get it, e.g. LinkedIn rate-limiting. Turn on the switch before saving to have the AI screen just that role against the new text, which fills in its fit, years and pay (about $0.0005; off by default)
+  - add or edit the description yourself (**+ Add description** / **Edit**) when the scrape didn't get it, e.g. LinkedIn rate-limiting. Turn on the switch before saving to have the AI screen just that role against the new text, which fills in its fit, years and pay (about $0.0005; on by default)
   - see the status history
   - view all scraped metadata
 - **Changing status opens a popup** whose fields depend on the new status. Every status asks for notes, which are saved to the role's history. Some ask for more:
@@ -232,7 +233,7 @@ Each listing is filtered on its own, so a role posted in several cities is kept 
 They use a temporary database, so `jobs.db` is never touched.
 
 ## Limitations
-- ZipRecruiter refuses rapid requests: the scraper gets about 20 job pages in a row before it's blocked, so later listings arrive without a description. Each pull fetches those again, a few seconds apart, for listings that pass your filters (up to 50 per pull, stopping if ZipRecruiter keeps refusing); `jobs.py descriptions` does the same for ZipRecruiter roles you already have.
+- ZipRecruiter refuses rapid requests: the scraper gets about 20 job pages in a row before it's blocked, so later listings arrive without a description. Each pull fetches those again, a few seconds apart, for listings that pass your filters (up to 50 per pull, stopping if ZipRecruiter keeps refusing); **Fetch missing descriptions** (or `jobs.py descriptions`, with `--all` to include Not a fit and archived roles and `--no-ai` to skip the AI) does the same for LinkedIn and ZipRecruiter roles you already have.
 - LinkedIn sometimes rate-limits scraping ("429" errors). Those postings come in without a description: open the posting and paste it into the role with **+ Add description**.
 - Experience and pay are read from description text, so check each posting before applying.
 - Scraping is against LinkedIn's terms of service. One run a day is a reasonable pace.

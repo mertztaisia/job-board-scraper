@@ -991,7 +991,7 @@
     body.removeAttribute("style");
     body.innerHTML = `<form id="descForm" style="display:flex;flex-direction:column;gap:8px">
         <label class="field"><textarea name="description" rows="12" placeholder="Paste the job description from the posting">${esc(r.description || "")}</textarea></label>
-        ${aiOn ? `<label class="switch"><input type="checkbox" name="rescreen"><span class="track"></span>
+        ${aiOn ? `<label class="switch"><input type="checkbox" name="rescreen" checked><span class="track"></span>
           <span>Screen this role with AI using this description (about $0.0005)</span></label>`
         : `<div class="cell-dim" style="font-size:12px">AI screening is off, so the fit won't be updated.</div>`}
         <div style="display:flex;gap:8px;justify-content:flex-end">
@@ -1161,10 +1161,70 @@
     pollTask();
   }
 
+  // Pull new roles ▾ → Fetch missing descriptions: re-reads the job page of roles you
+  // already have that came without a description, then (optionally) AI-assesses them.
+  async function startDescriptions() {
+    let counts;
+    try { counts = await api("/api/descriptions"); }
+    catch (e) { toast(e.message, "error"); return; }
+    const aiOn = META.ai.configured && META.ai_enabled;
+    const line = (c) => !c.total ? "Every role in this selection already has a description."
+      : `<b>${c.total.toLocaleString()}</b> role${c.total === 1 ? "" : "s"} without a description; `
+        + `<b>${c.fetchable.toLocaleString()}</b> can be fetched again (LinkedIn and ZipRecruiter).`
+        + (c.total > c.fetchable ? ` <span class="cell-dim">The rest are from boards whose pages can't be re-read (or were added by you); add those descriptions by hand.</span>` : "");
+    const pending = confirmDialog({
+      title: "Fetch missing descriptions?",
+      ok: "Fetch descriptions",
+      body: `
+        <div style="font-size:13px;line-height:1.5" id="descCount">${line(counts.open)}</div>
+        <div class="desc-options">
+          <label class="switch" style="padding:0"><input type="checkbox" id="descUseAi" ${aiOn ? "checked" : "disabled"}><span class="track"></span>
+            <span>Assess with AI<small>${aiOn ? `Screens each role that gets a description (${esc(META.model || "claude-haiku-5-5")}, about $0.0005 per role); a role the AI had marked Not a fit goes back to Not applied if it now fits.`
+              : (META.ai.configured ? "AI screening is turned off in Preferences." : "No API key yet, so the fit can't be assessed.")}</small></span></label>
+          <label class="switch" style="padding:0"><input type="checkbox" id="descOpenOnly" checked><span class="track"></span>
+            <span>Only open roles<small>Leaves out Not a fit and archived roles.</small></span></label>
+        </div>
+        <div class="cell-dim" style="font-size:12px;padding-top:12px">Pages are fetched a few seconds apart so the boards don't block it, at most 100 per board per run; it can take several minutes.</div>`,
+    });
+    const openOnly = $("#descOpenOnly"), useAi = $("#descUseAi");
+    openOnly.onchange = () => { $("#descCount").innerHTML = line(openOnly.checked ? counts.open : counts.all); };
+    if (!(await pending)) return;
+    const choice = { open_only: openOnly.checked, use_ai: aiOn && useAi.checked };   // the closed dialog keeps its body
+    if (!(choice.open_only ? counts.open : counts.all).fetchable) { toast("Nothing to fetch: no role in that selection is on LinkedIn or ZipRecruiter.", ""); return; }
+    try { await api("/api/descriptions", { method: "POST", body: choice }); }
+    catch (e) { if (e.status !== 409) { toast(e.message, "error"); return; } }
+    location.hash = "#/";
+    showTask(true, "descriptions");
+    pollTask();
+  }
+
+  function showDescriptionsSummary(s) {
+    const r = s.result || {}, ai = r.ai;
+    const n = (x) => (x ?? 0).toLocaleString();
+    const LABELS = { linkedin: "LinkedIn", zip_recruiter: "ZipRecruiter" };
+    const perSite = Object.entries(r.sites || {}).map(([k, v]) => `${esc(LABELS[k] || k)} ${n(v.fetched)} of ${n(v.tried)}`
+      + (v.error ? ` <span class="bad-text">(couldn't start: ${esc(v.error)})</span>` : v.stopped_early ? ' <span class="bad-text">(kept refusing, stopped early)</span>' : "")).join("<br>");
+    const aiLine = !r.use_ai ? "Off for this run"
+      : !ai ? "Nothing new to assess"
+      : ai.skipped ? esc(ai.skipped)
+      : `${n(ai.screened)} assessed · ${n(ai.rejected)} marked Not a fit · ${n(ai.restored)} back to Not applied · ${dollars(ai.cost, 4)}`
+        + (ai.errors ? ` · <span class="bad-text">${n(ai.errors)} failed</span>` : "");
+    confirmDialog({ title: "Fetch missing descriptions: done", ok: "OK", cancel: null, body: `
+      <div class="run-hero"><b>${n((r.described || []).length)}</b> role${(r.described || []).length === 1 ? "" : "s"} got a description</div>
+      <dl class="confirm-meta">
+        <dt>Without a description</dt><dd>${n(r.missing)}${r.open_only ? " open" : ""} role${r.missing === 1 ? "" : "s"}${r.unsupported ? `<div class="cell-dim">${n(r.unsupported)} on boards whose pages can't be re-read</div>` : ""}</dd>
+        <dt>Fetched</dt><dd>${perSite || "—"}</dd>
+        <dt>AI assessment</dt><dd>${aiLine}</dd>
+      </dl>
+      ${(r.fetched ?? 0) < (r.fetchable ?? 0) ? '<div class="cell-dim" style="font-size:12px;padding-top:8px">Some are still missing; run it again later for the rest.</div>' : ""}` });
+  }
+
   function showTask(on, kind) {
     $("#scrapeBanner").classList.toggle("hidden", !on);
     $("#scrapeTitle").textContent = kind === "rescreen" ? "AI re-screening roles"
+      : kind === "descriptions" ? "Fetching missing descriptions"
       : "Pulling new roles, then AI screening them";
+    $("#pullMore").disabled = on;
     const b = $("#scrapeBtn");
     b.disabled = on;
     b.classList.toggle("busy", on);
@@ -1198,6 +1258,7 @@
         else toast("Failed: " + s.error, "error");
       } else if (s.result) {
         if (s.kind === "pull") showPullSummary(s);
+        else if (s.kind === "descriptions") showDescriptionsSummary(s);
         else {
           const ai = s.result.ai || {};
           let msg = `Re-screened ${ai.screened || 0} roles: ${ai.rejected || 0} marked Not a fit, ${ai.restored || 0} restored (${dollars(ai.cost, 4)})`;
@@ -1242,7 +1303,7 @@
           <dt>Filtered out</dt><dd>${n(filteredTotal)}${filtered.length ? `<div class="cell-dim">${filtered.slice(0, 5)
             .map(([k, v]) => `${esc(k)}: ${n(v)}`).join("<br>")}${filtered.length > 5 ? "<br>…" : ""}</div>` : ""}</dd>
           ${r.zip_descriptions && r.zip_descriptions.tried ? `<dt>ZipRecruiter descriptions</dt><dd>${n(r.zip_descriptions.fetched)} of ${n(r.zip_descriptions.tried)} fetched${
-            r.zip_descriptions.stopped_early ? '<div class="cell-dim">ZipRecruiter kept refusing, so it stopped early. Run <code>jobs.py descriptions</code> later for the rest.</div>' : ""}</dd>` : ""}
+            r.zip_descriptions.stopped_early ? '<div class="cell-dim">ZipRecruiter kept refusing, so it stopped early. Use <b>Pull new roles ▾ → Fetch missing descriptions</b> later for the rest.</div>' : ""}</dd>` : ""}
           <dt>Passed filters</dt><dd>${n(r.kept)}</dd>
           <dt>AI screen</dt><dd>${aiLine}</dd>
         </dl>
@@ -1507,7 +1568,7 @@
     if (!el) return;
     const d = await api("/api/runs");
     const rows = d.runs.map((r) => `
-      <tr><td>${fmtDate(r.started_at, true)}</td><td>${r.kind === "rescreen" ? "Re-screen" : "Pull"}</td><td>${esc(r.trigger || "")}</td>
+      <tr><td>${fmtDate(r.started_at, true)}</td><td>${r.kind === "rescreen" ? "Re-screen" : r.kind === "descriptions" ? "Descriptions" : "Pull"}</td><td>${esc(r.trigger || "")}</td>
         <td class="num">${r.scraped ?? "—"}</td><td class="num">${r.added ?? "—"}</td><td class="num">${r.ai_screened ?? 0}</td>
         <td class="num">${r.ai_rejected ?? 0}</td><td class="num">${((r.ai_input_tokens || 0) + (r.ai_output_tokens || 0)).toLocaleString()}</td>
         <td class="num">${dollars(r.ai_cost, 4)}</td><td>${esc(r.status || "")}</td></tr>`).join("");
@@ -1849,6 +1910,15 @@
     $("#navMenu").classList.add("hidden");
     $("#brand").setAttribute("aria-expanded", "false");
   }
+  function openPullMenu() {
+    $("#pullMenu").classList.remove("hidden");
+    $("#pullMore").setAttribute("aria-expanded", "true");
+    $("#pullMenu a").focus();
+  }
+  function closePullMenu() {
+    $("#pullMenu").classList.add("hidden");
+    $("#pullMore").setAttribute("aria-expanded", "false");
+  }
 
   // ------------------------------------------------------------------ Routing
   let shownRoute = null;
@@ -1988,6 +2058,12 @@
     $("#addForm").job_url.addEventListener("input", () => { clearTimeout(dupeT); dupeT = setTimeout(checkDupes, 300); });
 
     $("#scrapeBtn").onclick = startScrape;
+    $("#pullMore").addEventListener("click", (e) => {
+      e.stopPropagation();
+      $("#pullMenu").classList.contains("hidden") ? openPullMenu() : closePullMenu();
+    });
+    $("#descFetchBtn").onclick = (e) => { e.preventDefault(); closePullMenu(); startDescriptions(); };
+    document.addEventListener("click", (e) => { if (!e.target.closest("#pullGroup")) closePullMenu(); });
     $("#scrapeLogBtn").onclick = () => $("#scrapeLog").classList.toggle("hidden");
 
     $("#themeBtn").onclick = () => {
@@ -2000,6 +2076,7 @@
       const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName);
       if (e.key === "Escape") {
         if (!$("#navMenu").classList.contains("hidden")) closeMenu();
+        else if (!$("#pullMenu").classList.contains("hidden")) closePullMenu();
         else if (!$("#confirmDialog").classList.contains("hidden")) $("#confirmDialog [data-cclose]").click();
         else if (!$("#stageDialog").classList.contains("hidden")) $("#stageDialog").classList.add("hidden");
         else if (!$("#addDialog").classList.contains("hidden")) closeAdd();

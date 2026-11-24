@@ -635,6 +635,17 @@ button.brand[aria-expanded="true"] .caret { transform: rotate(180deg); }
 .menu b { font-size: 13px; font-weight: 600; }
 .menu small { font-size: 12px; color: var(--text-3); }
 .menu-check { color: var(--blue4); visibility: hidden; font-size: 13px; }
+.menu.menu-right { left: auto; right: 0; min-width: 300px; }
+
+/* "Pull new roles" with a caret for more pull options */
+.split-btn { position: relative; display: inline-flex; }
+.split-btn > #scrapeBtn { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.split-btn > .split-caret { width: 26px; border-top-left-radius: 0; border-bottom-left-radius: 0;
+  border-left: 1px solid rgba(255,255,255,.28); }
+.split-caret svg { transition: transform .15s; }
+.split-caret[aria-expanded="true"] svg { transform: rotate(180deg); }
+.desc-options { display: flex; flex-direction: column; gap: 10px; padding-top: 12px; }
+.desc-options .switch small { display: block; color: var(--text-3); font-size: 12px; }
 .menu a.on .menu-check { visibility: visible; }
 
 /* ---------- Preferences: full-width, left-aligned, with section nav ---------- */
