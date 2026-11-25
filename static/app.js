@@ -1122,11 +1122,13 @@
   // page, optionally with AI; you check the filled-in form, then add) or "Enter manually".
   const aiAvailable = () => META.ai.configured && META.ai_enabled;
   let importSeq = 0;
+  let ruleNote = "";   // why the read link was preset to Not a fit (saved in the role's history)
   function openAdd() {
     const form = $("#addForm");
     form.reset();
     importSeq++;   // forget an import still running from last time
-    $("#addStatus").innerHTML = Object.entries(STATUSES).map(([k, l]) => `<option value="${k}" ${k === "applied" ? "selected" : ""}>${esc(l)}</option>`).join("");
+    $("#addStatus").innerHTML = Object.entries(STATUSES).map(([k, l]) => `<option value="${k}" ${k === "not_applied" ? "selected" : ""}>${esc(l)}</option>`).join("");
+    ruleNote = "";
     $("#addResume").innerHTML = `<option value="">— none —</option>` + RESUMES.map((f, i) => `<option value="${esc(f.path)}" ${i === 0 ? "selected" : ""}>${esc(f.name)}</option>`).join("");
     $("#dupeBox").classList.add("hidden");
     $$("#addFields .autofilled").forEach((el) => el.classList.remove("autofilled"));
@@ -1174,16 +1176,23 @@
     store.set("importAi", $("#importAi").checked);
     const seq = ++importSeq, btn = $("#importBtn");
     btn.disabled = true; btn.classList.add("working"); btn.textContent = "Reading the page…";
-    setImportStatus(useAi ? "Reading the page, then asking the AI. This can take up to half a minute."
+    setImportStatus(useAi ? "Reading the page, then asking the AI. This should take about 30 seconds."
       : "Reading the page. Pages built with JavaScript can take a few seconds more.");
     try {
       const r = await api("/api/import", { method: "POST", body: { url, use_ai: useAi } });
       if (seq !== importSeq) return;   // the dialog was closed or reopened meanwhile
       fillAddForm(r.fields);
+      // New roles start as Not applied, unless the posting breaks one of your must-have
+      // preferences (the same rules a pull uses): then Not a fit, which you can change.
+      const status = $("#addStatus");
+      status.value = r.not_a_fit ? "not_a_fit" : "not_applied";
+      status.closest("label").classList.toggle("autofilled", !!r.not_a_fit);
+      ruleNote = r.not_a_fit ? `Not a fit by your preferences: ${r.not_a_fit}` : "";
       const used = [...new Set(Object.values(r.sources || {}))].map((x) => IMPORT_SOURCES[x] || x);
       const n = Object.keys(r.fields).filter((k) => !["job_url", "site"].includes(k)).length;
       const cost = r.ai && r.ai.used ? ` AI cost ${dollars(r.ai.cost, 4)}.` : "";
-      setImportStatus(`<b>Filled in ${n} field${n === 1 ? "" : "s"}</b> from ${used.length > 1 ? used.slice(0, -1).join(", ") + " and " + used.at(-1) : used[0] || "the page"}.${cost} Check them below, then add the role.`
+      const verdict = r.not_a_fit ? `<div class="import-verdict"><b>Set to Not a fit:</b> ${esc(r.not_a_fit)} (your preferences). Change the status if you still want it.</div>` : "";
+      setImportStatus(verdict + `<b>Filled in ${n} field${n === 1 ? "" : "s"}</b> from ${used.length > 1 ? used.slice(0, -1).join(", ") + " and " + used.at(-1) : used[0] || "the page"}.${cost} Check them below, then add the role.`
         + (r.messages && r.messages.length ? `<ul>${r.messages.map((m) => `<li>${esc(m)}</li>`).join("")}</ul>` : ""));
       addFilled = true;
       setAddMode("link");
@@ -1233,6 +1242,7 @@
     for (const k of ["pay_min", "pay_max", "years_min", "years_max"]) body[k] = body[k] === "" ? null : Number(body[k]);
     body.is_remote = fd.get("is_remote") ? 1 : 0;
     const screen = !!body.screen_after && aiAvailable() && (body.description || "").trim();
+    if (ruleNote && body.status === "not_a_fit") body.status_note = ruleNote;
     body.screen_after = undefined;   // not a role field (JSON leaves it out)
     try {
       const r = await api("/api/roles", { method: "POST", body });

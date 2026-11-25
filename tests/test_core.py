@@ -1391,6 +1391,39 @@ class JobImportTests(TempDB):
                          ("Platform Engineer", "Initech", "linkedin", True, "fulltime"))
         self.assertEqual((f["pay_min"], f["pay_max"], f["years_min"]), (120000, 140000, 2))
 
+    def test_rule_check_on_imported_fields(self):
+        ok = {"title": "Software Engineer", "company": "Acme", "location": "New York, NY (+2 more)",
+              "description": "2+ years of experience building APIs."}
+        check = lambda **kw: daily_jobs.rule_check({**ok, **kw}, self.prefs)
+        self.assertIsNone(check())                                           # "(+2 more)" doesn't confuse it
+        self.assertIsNone(check(date_posted="2020-01-01"))                   # age isn't held against it
+        self.assertEqual(check(location="San Francisco, CA"), "the location isn't one of your places")
+        self.assertIsNone(check(location="", is_remote=True))                # remote roles are allowed
+        self.assertEqual(check(years_min=6, description=None), "it asks for 6+ years of experience")
+        self.assertEqual(check(pay_min=90000, pay_max=100000), "the top of the pay range is below your minimum")
+        self.assertEqual(check(title="Senior Software Engineer"), "the title has an excluded word or a senior level")
+        db.block_company(self.conn, "Acme")
+        self.assertEqual(daily_jobs.rule_check(ok, db.get_prefs(self.conn)), "the company is on your blocked list")
+
+    def test_import_api_suggests_not_a_fit_and_history_says_why(self):
+        import app
+        import job_import
+        client = app.app.test_client()
+        orig = job_import.import_from_url
+        job_import.import_from_url = lambda url, use_ai=False: {
+            "fields": {"title": "Software Engineer", "company": "Globex", "location": "San Francisco, CA"},
+            "sources": {}, "messages": [], "board": None, "ai": None}
+        try:
+            r = client.post("/api/import", json={"url": "https://x.example/1"}).get_json()
+        finally:
+            job_import.import_from_url = orig
+        self.assertEqual(r["not_a_fit"], "the location isn't one of your places")
+        role = client.post("/api/roles", json={"title": "Software Engineer", "company": "Globex", "status": "not_a_fit",
+                                               "status_note": "Not a fit by your preferences: " + r["not_a_fit"]}).get_json()
+        self.assertEqual((role["status"], role["history"][0]["note"]),
+                         ("not_a_fit", "Added manually. Not a fit by your preferences: the location isn't one of your places"))
+        self.assertFalse(db.last_change_by_ai(self.conn, role["id"]))         # your call, not the AI's
+
     def test_board_detection(self):
         import job_import
         self.assertEqual(job_import.board_of("https://www.indeed.com/viewjob?jk=7d53cae1fc6f3c7a"), "indeed")

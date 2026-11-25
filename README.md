@@ -156,7 +156,8 @@ Then create `.env` and run `service.ps1 install`.
     - **Use AI to read the page** (on by default when AI screening is set up; about $0.001) has Claude fill in what the page doesn't state plainly, such as the company or a pay range in the text. It keeps values that came from the job board or the page's job data. It never writes the description: that is always the posting's own text, word for word. When the description comes from the page's general text (which can include navigation or the application form), the AI only marks where the job description starts and ends, and the text in between is copied exactly as it is. The cost shows in the pull history as an Import run.
     - Pages behind a sign-in can't be read, and only public web addresses are fetched (links to this computer or your local network are refused).
   - **Enter manually:** type the details in yourself.
-  - Either way, **Screen this role with AI after adding** (on when AI is set up) assesses its fit once it's added, if it has a description.
+  - New roles start as **Not applied**. When a link is read, its details are checked against your must-have preferences with the same rules a pull uses (blocked companies, title words, location, remote, employment type, years, pay); if one is broken, the status is set to **Not a fit** with the reason shown (and saved in the role's history). You can change it before adding.
+  - Either way, **Screen this role with AI after adding** (on when AI is set up) assesses its fit once it's added, if it has a description; like a pulled role, a Not applied role the AI finds clearly breaks a must-have is marked Not a fit.
 - **Theme:** the half-moon button switches between light and dark.
 
 ## AI screening setup

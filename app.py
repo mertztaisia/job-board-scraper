@@ -254,7 +254,10 @@ def create_role():
         rec["site"] = rec.get("site") or "manual"
         rec["source"] = "manual"
         try:
-            rid, _ = db.upsert_role(c, rec, status=status, note="Added manually")
+            # status_note: why the dialog suggested this status (e.g. a preference it breaks)
+            why = data.get("status_note") if isinstance(data.get("status_note"), str) else ""
+            rid, _ = db.upsert_role(c, rec, status=status,
+                                    note="Added manually" + (f". {why.strip()[:300]}" if why.strip() else ""))
         except ValueError as e:
             return jsonify(error=str(e)), 400
         extra = {k: data.get(k) for k in ("resume_path", "notes", "applied_at") if data.get(k)}
@@ -391,9 +394,15 @@ def import_link():
     if not isinstance(data.get("url"), str):
         return jsonify(error="Paste the link to a job posting."), 400
     try:
-        return jsonify(job_import.import_from_url(data["url"], use_ai=data.get("use_ai") is True))
+        result = job_import.import_from_url(data["url"], use_ai=data.get("use_ai") is True)
     except job_import.ImportProblem as e:
         return jsonify(error=str(e)), 422
+    # Does it break a must-have preference (the same rules a pull uses)? The dialog then
+    # suggests Not a fit instead of Not applied.
+    import daily_jobs
+    with conn() as c:
+        result["not_a_fit"] = daily_jobs.rule_check(result["fields"], db.get_prefs(c))
+    return jsonify(result)
 
 
 @app.get("/api/check")

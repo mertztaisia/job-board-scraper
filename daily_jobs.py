@@ -437,11 +437,14 @@ def posted_at(job: dict) -> dt.date | None:
 # ----------------------------------------------------------------------------
 # Rule filters (mandatory preferences only)
 # ----------------------------------------------------------------------------
-def evaluate(job: dict, today: dt.date, prefs: dict) -> tuple[bool, str, dict]:
+def evaluate(job: dict, today: dt.date, prefs: dict, known: dict | None = None) -> tuple[bool, str, dict]:
+    """(passes, reason it doesn't, info). known: years/salary already worked out (e.g. by
+    Add role from a link), used instead of reading them from the description."""
     title = job.get("title") or ""
     company = job.get("company") or ""
     info: dict = {"posted": posted_at(job), "years": years_required(job),
                   "salary": salary_range(job)}
+    info.update({k: v for k, v in (known or {}).items() if v is not None})
     ok, info["where"] = location_ok(job, prefs)
     info["ai"] = bool(AI_TERMS.search(title)) or bool(AI_TERMS.search((job.get("description") or "")[:2000]))
 
@@ -502,6 +505,46 @@ def evaluate(job: dict, today: dt.date, prefs: dict) -> tuple[bool, str, dict]:
         if not s and not sal.get("include_unlisted", True):
             return False, "pay not listed", info
     return True, "", info
+
+
+# The rule-filter reasons above, said in full for the Add role dialog.
+REASON_TEXT = {
+    "location": "the location isn't one of your places",
+    "not remote": "it isn't remote",
+    "blocked company": "the company is on your blocked list",
+    "title missing required words": "the title has none of your required words",
+    "title has excluded words / level": "the title has an excluded word or a senior level",
+    "internship": "it's an internship",
+    "entry level by years": "it's entry level",
+    "pay too low": "the top of the pay range is below your minimum",
+    "pay floor too low": "the bottom of the pay range is below your minimum",
+    "pay not listed": "no pay is listed",
+}
+
+
+def rule_check(fields: dict, prefs: dict) -> str | None:
+    """Why a role you're adding (e.g. read from a link) breaks one of your must-have
+    preferences, with the same rules a pull uses; None if it doesn't. The posting's age
+    isn't checked: you chose to add it."""
+    location = re.sub(r"\s*\(\+\d+ more\)$", "", str(fields.get("location") or ""))
+    job = {"title": fields.get("title"), "company": fields.get("company"), "location": location,
+           "is_remote": bool(fields.get("is_remote")), "description": fields.get("description"),
+           "job_type": fields.get("job_type"), "job_level": fields.get("job_level")}
+    known = {}
+    if fields.get("years_min") is not None:
+        known["years"] = (int(fields["years_min"]),
+                          int(fields["years_max"]) if fields.get("years_max") is not None else None)
+    if fields.get("pay_min") or fields.get("pay_max"):
+        lo, hi = fields.get("pay_min"), fields.get("pay_max")
+        known["salary"] = (float(lo or hi), float(hi or lo))
+    ok, reason, _ = evaluate(job, dt.date.today(), prefs, known)
+    if ok:
+        return None
+    if reason.endswith("years required"):
+        return f"it asks for {reason.split()[0]} years of experience"
+    if reason.startswith("job type"):
+        return f"the employment type ({reason[10:-1]}) isn't one you want"
+    return REASON_TEXT.get(reason, reason)
 
 
 def to_record(job: dict, info: dict) -> dict:
