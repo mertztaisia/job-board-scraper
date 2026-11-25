@@ -16,7 +16,7 @@
   let RESUMES = [];
   const FILTER_DEFAULTS = {
     statuses: [], tags: [], remote: false, paid: false, added: "",
-    fits: [], minPay: "", maxYears: "", posted: "", sites: [], described: false, todo: false, locs: [],
+    fits: [], minPay: "", maxYears: "", posted: "", sites: [], described: false, todo: false, locs: [], companies: [],
   };
   const state = Object.assign({ q: "", ...FILTER_DEFAULTS, sort: "status", order: "asc" },
     store.get("filters.v2", {}));
@@ -36,7 +36,7 @@
     ["q", "q", "text"], ["statuses", "status", "list"], ["fits", "fit", "list"], ["tags", "tags", "pipe"],
     ["remote", "remote", "flag"], ["paid", "paid", "flag"], ["described", "described", "flag"], ["todo", "todo", "flag"],
     ["minPay", "min_pay", "text"], ["maxYears", "max_years", "text"], ["posted", "posted", "text"], ["added", "added", "text"],
-    ["sites", "sites", "list"], ["locs", "loc", "pipe"], ["archived", "archived", "flag"],
+    ["sites", "sites", "list"], ["locs", "loc", "pipe"], ["companies", "co", "pipe"], ["archived", "archived", "flag"],
     ["sort", "sort", "text"], ["order", "order", "text"], ["page", "page", "int"],
   ];
   const URL_DEFAULTS = { q: "", ...FILTER_DEFAULTS, archived: false, sort: "status", order: "asc", page: 1 };
@@ -276,6 +276,26 @@
   const PLACES_SHOWN = 8;
   let showAllPlaces = false;
 
+  // Company: employers you've picked (click to remove), then the employers with the most
+  // roles (the first few, then "+N more"); the box suggests every employer as you type.
+  function renderCompanyFilter() {
+    const picked = new Set(state.companies.map((c) => c.toLowerCase()));
+    const all = META.companies || [];
+    const suggestions = all.filter((c) => !picked.has(c.name.toLowerCase()));
+    const shown = showAllCompanies ? suggestions : suggestions.slice(0, COMPANIES_SHOWN);
+    const more = suggestions.length - shown.length;
+    $("#coFilter").innerHTML =
+      state.companies.map((c) => `<button class="chip on" data-co-rm="${esc(c)}" title="Remove">${esc(c)}<span class="chip-x">×</span></button>`).join("")
+      + shown.map((c) => `<button class="chip add" data-co-add="${esc(c.name)}" title="${c.count} role${c.count === 1 ? "" : "s"}">${esc(c.name)}</button>`).join("")
+      + (more > 0 ? `<button class="chip" data-companies-more>+${more} more</button>`
+        : showAllCompanies && suggestions.length > COMPANIES_SHOWN ? `<button class="chip" data-companies-more>Show fewer</button>` : "")
+      + (!all.length && !state.companies.length ? '<span class="empty-note">No roles yet.</span>' : "");
+    const opts = all.map((c) => `<option value="${esc(c.name)}">${c.count} role${c.count === 1 ? "" : "s"}</option>`).join("");
+    if ($("#companyOptions").innerHTML !== opts) $("#companyOptions").innerHTML = opts;
+  }
+  const COMPANIES_SHOWN = 8;
+  let showAllCompanies = false;
+
   // Badge on each collapsible group: how many of its filters are on.
   function renderFilterBadges() {
     const counts = {
@@ -283,6 +303,7 @@
       fit: state.fits.length,
       interests: state.tags.length,
       location: (state.remote ? 1 : 0) + state.locs.length,
+      company: state.companies.length,
       role: [state.paid, state.described, state.minPay, state.maxYears].filter(Boolean).length,
       dates: [state.posted, state.added].filter(Boolean).length,
       source: state.sites.length,
@@ -340,6 +361,7 @@
     if (state.described) p.set("described", "1");
     if (state.todo) p.set("todo", "1");
     if (state.locs.length) p.set("loc", state.locs.join("|"));
+    if (state.companies.length) p.set("co", state.companies.join("|"));
     p.set("limit", state.pageSize);
     p.set("offset", (state.page - 1) * state.pageSize);
     const data = await api("/api/roles?" + p);
@@ -350,6 +372,7 @@
     renderStatusList(data.counts);
     renderTagFilter();
     renderChipFilters();
+    renderCompanyFilter();
     renderNavStats(data.all_counts);
     renderRows();
     renderPager(data.matching);
@@ -576,8 +599,31 @@
         </div>
 
         <div class="card"><details class="raw"><summary>All scraped metadata</summary><pre>${esc(JSON.stringify(meta, null, 2))}</pre></details></div>
+
+        ${sameCompanyCard(r)}
       </div>`;
     wireDrawer();
+  }
+
+  // Your other roles at this employer (under any of its names), at the bottom of the panel.
+  function sameCompanyCard(r) {
+    const others = r.same_company || [];
+    const place = (o) => {
+      const loc = o.location && !/^remote$/i.test(o.location) ? o.location : "";
+      return (o.is_remote ? "Remote" : "") + (o.is_remote && loc && !/^remote/i.test(loc) ? " · " : "") + (/^remote/i.test(loc) && o.is_remote ? "" : loc);
+    };
+    const rows = others.map((o) => `
+      <li data-open-role="${o.id}" tabindex="0" title="Open this role">
+        <div class="sc-main"><div class="sc-title">${esc(o.title)}${o.archived ? ' <span class="tag mini archived">ARCHIVED</span>' : ""}</div>
+          <div class="sc-sub">${esc(place(o))}${o.company !== r.company ? `${place(o) ? " · " : ""}listed as ${esc(o.company)}` : ""}</div></div>
+        <div class="sc-side">${statusTag(o.status, true)}${fitPill(o)}</div>
+      </li>`).join("");
+    return `<div class="card" id="sameCompanyCard">
+      <div class="card-head"><span>Other roles at ${esc(r.company)}${others.length ? ` (${others.length})` : ""}</span>
+        ${others.length ? `<button class="btn minimal small" id="filterCompany" title="Show only this employer's roles in the list">Show in list</button>` : ""}</div>
+      <div class="card-body">${others.length ? `<ul class="same-co">${rows}</ul>`
+        : '<div class="cell-dim" style="font-size:13px">No other roles at this company in your tracker.</div>'}</div>
+    </div>`;
   }
 
   function setSaveState(text, ok) {
@@ -662,6 +708,23 @@
     if (ex) ex.onclick = () => { const d = $("#desc"); d.classList.toggle("expanded"); ex.textContent = d.classList.contains("expanded") ? "Collapse" : "Expand"; };
     $("#editDesc").onclick = renderDescEditor;
     $("#editBtn").onclick = renderEditDetails;
+    $$("#sameCompanyCard [data-open-role]").forEach((li) => {
+      const go = () => openRole(+li.dataset.openRole);
+      li.onclick = go;
+      li.onkeydown = (e) => { if (e.key === "Enter") go(); };
+    });
+    const fc = $("#filterCompany");
+    if (fc) fc.onclick = () => {
+      // The panel lists archived matches too, so include archived roles if any are among them.
+      const anyArchived = (current.same_company || []).some((o) => o.archived);
+      // The shortest of the employer's names ("Globex", not "Globex.com Services LLC") still
+      // matches every one of them, and reads better on the chip.
+      const name = [current.company, ...(current.same_company || []).map((o) => o.company)]
+        .reduce((a, b) => (b.length < a.length ? b : a));
+      Object.assign(state, { companies: [name], page: 1 }, anyArchived ? { archived: true } : {});
+      refilter();
+      toast(`Showing roles at ${name}. Remove it under Company in the filters.`, "success");
+    };
   }
 
   // ------------------------------------------------------------------ Offer / interviews / Q&A cards
@@ -1999,9 +2062,29 @@
       if (e.target.closest("[data-remote]")) { state.remote = !state.remote; refilter(); }
       if (e.target.closest("[data-places-more]")) { showAllPlaces = !showAllPlaces; renderChipFilters(); }
     });
+    const addCompany = (v) => {
+      v = (v || "").trim();
+      const known = (META.companies || []).find((c) => c.name.toLowerCase() === v.toLowerCase());
+      if (known) v = known.name;   // "initech" -> "Initech", as the employer is listed
+      if (v && !state.companies.some((c) => c.toLowerCase() === v.toLowerCase())) { state.companies = [...state.companies, v]; refilter(); }
+    };
+    $("#fCoInput").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); addCompany(e.target.value); e.target.value = ""; }
+    });
+    // Picking a suggestion from the list adds it right away.
+    $("#fCoInput").addEventListener("input", (e) => {
+      if (e.inputType && e.inputType !== "insertReplacementText") return;
+      if ((META.companies || []).some((c) => c.name === e.target.value)) { addCompany(e.target.value); e.target.value = ""; }
+    });
+    $("#coFilter").addEventListener("click", (e) => {
+      const add = e.target.closest("[data-co-add]"), rm = e.target.closest("[data-co-rm]");
+      if (add) addCompany(add.dataset.coAdd);
+      if (rm) { state.companies = state.companies.filter((c) => c !== rm.dataset.coRm); refilter(); }
+      if (e.target.closest("[data-companies-more]")) { showAllCompanies = !showAllCompanies; renderCompanyFilter(); }
+    });
     $("#clearFilters").onclick = () => {
       Object.assign(state, structuredClone(FILTER_DEFAULTS), { archived: false, sort: "status", order: "asc" });
-      $("#q").value = ""; state.q = ""; $("#fLocInput").value = "";
+      $("#q").value = ""; state.q = ""; $("#fLocInput").value = ""; $("#fCoInput").value = "";
       $$(".fgroup").forEach((d) => { d.open = false; });   // collapse every group (remembered via "toggle")
       refilter();
     };

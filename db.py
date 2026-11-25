@@ -287,6 +287,8 @@ def _open(path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     conn.create_function("REGEXP", 2, _regexp, deterministic=True)
+    # Same employer under any of its names (see companies_match), for the company filter.
+    conn.create_function("COMPANY_MATCH", 2, lambda a, b: companies_match(a, b), deterministic=True)
     return conn
 
 
@@ -1099,7 +1101,40 @@ def get_role(conn, role_id: int) -> dict | None:
     d["history"] = [dict(h) for h in conn.execute(
         "SELECT status, note, at FROM status_history WHERE role_id=? ORDER BY at DESC, id DESC",
         (role_id,))]
+    d["same_company"] = same_company_roles(conn, role_id, d["company"])
     return d
+
+
+def same_company_roles(conn, role_id: int, company) -> list[dict]:
+    """Your other roles at this employer, under any of its names ("Globex" / "Globex.com
+    Services LLC"): open roles first, then newest first; archived ones are included and marked."""
+    return [dict(r) for r in conn.execute(
+        "SELECT id, title, company, location, is_remote, status, archived, ai_match, first_seen, applied_at "
+        "FROM roles WHERE id != ? AND COMPANY_MATCH(company, ?) "
+        "ORDER BY COALESCE(archived,0), (status IN ('not_a_fit','rejected','withdrawn','closed')), "
+        "first_seen DESC, id DESC", (role_id, company))]
+
+
+def common_companies(conn) -> list[dict]:
+    """Employers of your (non-archived) roles, most roles first, as [{"name", "count"}],
+    for the sidebar's company filter. Names of the same employer ("Globex", "Globex.com")
+    count together, under the spelling used most."""
+    by_core: dict[str, dict[str, int]] = {}
+    for (name,) in conn.execute("SELECT company FROM roles WHERE COALESCE(archived,0)=0 AND company IS NOT NULL"):
+        key = company_core(name)
+        if key:
+            spellings = by_core.setdefault(key, {})
+            spellings[name.strip()] = spellings.get(name.strip(), 0) + 1
+    # Join names the filter treats as one employer ("globex" / "globex services"): shortest
+    # first, so each longer name joins the shorter one it extends.
+    groups: dict[str, dict[str, int]] = {}
+    for key in sorted(by_core, key=len):
+        root = next((g for g in groups if key.startswith(g + " ")), key)
+        sp = groups.setdefault(root, {})
+        for n, c in by_core[key].items():
+            sp[n] = sp.get(n, 0) + c
+    out = [{"name": max(sp, key=lambda n: (sp[n], -len(n))), "count": sum(sp.values())} for sp in groups.values()]
+    return sorted(out, key=lambda c: (-c["count"], c["name"].lower()))
 
 
 LIST_COLS = ("id, title, company, location, is_remote, site, job_url, job_url_direct, "
@@ -1137,7 +1172,7 @@ def list_roles(conn, q="", statuses=None, remote=False, paid=False, tags=None,
                added_since=None, sort="status", order="asc", include_archived=False,
                limit=None, offset=0, with_total=False, fits=None, min_pay=None,
                max_years=None, posted_since=None, sites=None, has_description=False,
-               step_todo=False, locations=None):
+               step_todo=False, locations=None, companies=None):
     """Filtered, sorted roles. limit/offset page through the results;
     with_total=True also returns how many roles match before paging.
 
@@ -1149,7 +1184,9 @@ def list_roles(conn, q="", statuses=None, remote=False, paid=False, tags=None,
     has_description: only roles with a description.
     step_todo: only roles with a step still to do.
     locations: place names ("Brooklyn", "CA"); a role matches if its location contains any of them.
-    remote together with locations: remote roles OR roles in those places."""
+    remote together with locations: remote roles OR roles in those places.
+    companies: employer names; a role matches if it's at any of them, under any of the
+    employer's names (see companies_match)."""
     # Archived roles are excluded at the SQL level unless asked for, so they are
     # never loaded, counted or searched in the default view.
     where, args = ([] if include_archived else ["COALESCE(archived, 0)=0"]), []
@@ -1208,6 +1245,10 @@ def list_roles(conn, q="", statuses=None, remote=False, paid=False, tags=None,
     if loc_parts:
         where.append("(" + " OR ".join(loc_parts) + ")")
         args += [r"\b" + re.escape(l).replace(r"\ ", r"[\s,.-]+") + r"\b" for l in locs]
+    cos = [c.strip() for c in (companies or []) if c and c.strip()]
+    if cos:
+        where.append("(" + " OR ".join("COMPANY_MATCH(company, ?)" for _ in cos) + ")")
+        args += cos
     base_where = " AND ".join(where) or "1=1"
 
     counts = {k: 0 for k in STATUSES}

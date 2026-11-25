@@ -637,6 +637,16 @@ button.brand[aria-expanded="true"] .caret { transform: rotate(180deg); }
 .menu-check { color: var(--blue4); visibility: hidden; font-size: 13px; }
 .menu.menu-right { left: auto; right: 0; min-width: 300px; }
 
+/* Role panel: other roles at the same company */
+.same-co { list-style: none; margin: 0; padding: 0; }
+.same-co li { display: flex; align-items: center; gap: 10px; padding: 7px 8px; margin: 0 -8px; border-radius: var(--radius); cursor: pointer; }
+.same-co li + li { border-top: 1px solid var(--border); }
+.same-co li:hover, .same-co li:focus-visible { background: var(--hover); outline: none; }
+.same-co .sc-main { flex: 1; min-width: 0; }
+.same-co .sc-title { font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.same-co .sc-sub { font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.same-co .sc-side { display: flex; align-items: center; gap: 8px; flex: none; }
+
 /* "Pull new roles" with a caret for more pull options */
 .split-btn { position: relative; display: inline-flex; }
 .split-btn > #scrapeBtn { border-top-right-radius: 0; border-bottom-right-radius: 0; }

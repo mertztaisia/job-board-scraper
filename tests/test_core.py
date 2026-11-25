@@ -1174,5 +1174,46 @@ class FetchMissingDescriptionsTests(TempDB):
         self.assertEqual(app.TASK["result"], {"described": []})
 
 
+class CompanyTests(TempDB):
+    """Company filter in the sidebar, and other roles at the same company in the role panel."""
+
+    def setUp(self):
+        super().setUp()
+        add = lambda title, company, url, **kw: db.upsert_role(self.conn, job(title=title, company=company, job_url=url, **kw))[0]
+        self.a = add("Backend Engineer", "Globex", "https://example.com/g1")
+        self.b = add("Data Engineer", "Globex.com Services LLC", "https://example.com/g2", location="Austin, TX")
+        self.c = add("ML Engineer", "Globex", "https://example.com/g3")
+        self.other = add("Backend Engineer", "Initech", "https://example.com/i1")
+        self.lookalike = add("Platform Engineer", "Globexian Labs", "https://example.com/x1")
+        db.set_archived(self.conn, self.c, True)
+        db.update_role(self.conn, self.b, {"status": "rejected"})
+        self.conn.commit()
+
+    def test_other_roles_at_the_same_company(self):
+        same = db.get_role(self.conn, self.a)["same_company"]
+        self.assertEqual([r["id"] for r in same], [self.b, self.c])    # open first; archived ones included
+        self.assertEqual(same[1]["archived"], 1)
+        self.assertEqual(db.get_role(self.conn, self.other)["same_company"], [])
+
+    def test_filter(self):
+        ids = lambda **kw: sorted(r["id"] for r in db.list_roles(self.conn, **kw)[0])
+        self.assertEqual(ids(companies=["globex"]), sorted([self.a, self.b]))          # any name, any case
+        self.assertEqual(ids(companies=["Globex"], include_archived=True), sorted([self.a, self.b, self.c]))
+        self.assertEqual(ids(companies=["Globex", "Initech"]), sorted([self.a, self.b, self.other]))
+        self.assertEqual(ids(companies=["Globexian Labs"]), [self.lookalike])          # not a prefix of a word
+
+    def test_common_companies(self):
+        self.assertEqual(db.common_companies(self.conn)[:2],
+                         [{"name": "Globex", "count": 2}, {"name": "Globexian Labs", "count": 1}])
+
+    def test_api(self):
+        import app
+        client = app.app.test_client()
+        r = client.get("/api/roles", query_string={"co": "Globex|Initech"}).get_json()
+        self.assertEqual(r["matching"], 3)
+        self.assertIn({"name": "Globex", "count": 2}, client.get("/api/meta").get_json()["companies"])
+        self.assertEqual(len(client.get(f"/api/roles/{self.a}").get_json()["same_company"]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

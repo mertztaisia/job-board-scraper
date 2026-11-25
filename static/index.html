@@ -91,6 +91,14 @@
         <div class="chip-filter" id="locFilter"></div>
       </details>
 
+      <details class="fgroup" data-group="company">
+        <summary>Company <span class="fbadge" id="badge-company"></span></summary>
+        <input class="finput" id="fCoInput" type="search" list="companyOptions" placeholder="Company name, then Enter" autocomplete="off"
+               title="Roles at this employer, under any of its names (Globex, Globex.com, Globex Services LLC). Add several to match any of them.">
+        <datalist id="companyOptions"></datalist>
+        <div class="chip-filter" id="coFilter"></div>
+      </details>
+
       <details class="fgroup" data-group="role">
         <summary>Role details <span class="fbadge" id="badge-role"></span></summary>
         <label class="switch"><input type="checkbox" id="fPaid"><span class="track"></span><span>Pay listed</span></label>
