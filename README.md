@@ -39,7 +39,7 @@ Double-click `start_tracker.bat`, or run:
 ### Versions
 Each release has a version number (`MAJOR.MINOR.PATCH`: a new feature is the next minor version, a fix the next patch) and a git tag `vX.Y.Z`; [CHANGELOG.md](CHANGELOG.md) says what changed in each. The version that's running shows at the bottom of the sidebar.
 
-- **Which version runs:** the latest release, unless you say otherwise. Run your own unreleased changes with `local`, or an older release by its number:
+- **Which version runs:** the latest release, unless you say otherwise. Run your own unreleased changes with `local` (it restarts by itself a moment after you save a `.py` file or `.env`, so edits show up right away; a running pull finishes first), or an older release by its number:
   ```powershell
   powershell -ExecutionPolicy Bypass -File service.ps1 restart -Version local
   ```
@@ -269,6 +269,7 @@ Each listing is filtered on its own, so a role posted in several cities is kept 
 They use a temporary database, so `jobs.db` is never touched.
 
 ## Limitations
+- LinkedIn blocks rapid page visits too, so a pull searches LinkedIn without opening each job's page, then opens the pages of only the listings worth it: new ones (not already in your tracker or seen before) that pass your rules on what the listing shows (title words, place, remote, company, type, listed pay; no AI), plus roles you have that still lack a description, a few seconds apart and at most 50 per pull. Years of experience are checked again once the description is in, before a role is added.
 - ZipRecruiter refuses rapid requests: the scraper gets about 20 job pages in a row before it's blocked, so later listings arrive without a description. Each pull fetches those again, a few seconds apart, for listings that pass your filters (up to 50 per pull, stopping if ZipRecruiter keeps refusing); **Fetch missing descriptions** (or `jobs.py descriptions`, with `--all` to include Not a fit and archived roles and `--no-ai` to skip the AI) does the same for LinkedIn and ZipRecruiter roles you already have.
 - LinkedIn sometimes rate-limits scraping ("429" errors). Those postings come in without a description: open the posting and paste it into the role with **+ Add description**.
 - Experience and pay are read from description text, so check each posting before applying.

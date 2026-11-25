@@ -6,6 +6,16 @@ Run any of them with `launch.py --version X.Y.Z` (see the README's Versions sect
 new one with `release.py`. Write changes under **Unreleased** as you go.
 
 ## [Unreleased]
+### Added
+- With `--version local` (or `service.ps1 ... -Version local`) the tracker restarts by itself a
+  moment after you save a `.py` file or `.env`, so your edits show up right away; a pull or
+  re-screen that's running finishes first, and code that fails to start is retried on the next
+  save. `--no-reload` (or `JOBS_RELOAD=0`) turns it off. `service.ps1 stop` also stops the launcher.
+### Changed
+- Pulls are much faster on LinkedIn: it's searched without opening every result's job page (up to
+  200 per search, which took about 2 minutes a search and got pulls blocked). Descriptions are
+  fetched afterwards only for new listings that pass your rules on what the listing shows (no AI),
+  and for roles you have that still lack one. The pull summary lists the descriptions fetched per board.
 
 ## [1.8.0] - 2026-11-25
 ### Added

@@ -202,10 +202,100 @@ def requirements_differ(folder: Path) -> bool:
         return False
 
 
+# ----------------------------------------------------------------------------
+# Restart on code changes (local only): your edits show up right away
+# ----------------------------------------------------------------------------
+RELOAD_POLL = 1.0   # seconds between checks for changed files
+
+
+def code_snapshot(folder: Path) -> dict:
+    """When each of the folder's Python files (and .env) last changed. Page files (static/)
+    aren't included: the server sends their newest version on every reload anyway."""
+    files = list(folder.glob("*.py")) + [folder / ".env"]
+    snap = {}
+    for f in files:
+        try:
+            snap[f.name] = f.stat().st_mtime
+        except OSError:
+            pass
+    return snap
+
+
+def run_in_progress() -> bool:
+    """True while a pull, re-screen or description fetch holds the run lock."""
+    import db
+    try:
+        with db.run_lock():
+            return False
+    except db.RunInProgress:
+        return True
+
+
+def _stop(proc):
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
+def run_with_reload(cmd: list, folder: Path, env: dict, poll: float = RELOAD_POLL,
+                    sleep=None, busy=run_in_progress, start=None) -> int:
+    """Run cmd, and restart it whenever a .py file (or .env) in folder changes. A pull or
+    re-screen that's running is allowed to finish first; if the code fails to start, it's
+    started again on the next save instead of giving up."""
+    import time
+    sleep = sleep or time.sleep
+    start = start or (lambda: subprocess.Popen(cmd, cwd=str(folder), env=env))
+    say("Watching this folder: the tracker restarts when you save a .py file (or .env).")
+    seen = code_snapshot(folder)
+    proc = start()
+    waiting = crashed = False
+    def changed_files(old: dict, new: dict) -> list[str]:
+        # Saved (newer time) or new files. A file that briefly can't be read (OneDrive and
+        # virus scanners lock files for a moment) is not a change.
+        return sorted(name for name, t in new.items() if old.get(name) != t)
+
+    try:
+        while True:
+            sleep(poll)
+            code = proc.poll()
+            now = {**seen, **code_snapshot(folder)}
+            changed = changed_files(seen, now)
+            if not changed:
+                if code is not None and not crashed:
+                    if code == 0:
+                        return 0
+                    say(f"The tracker stopped (exit code {code}). It starts again when you save a fix.")
+                    crashed = True
+                continue
+            if code is None and busy():
+                if not waiting:
+                    say(f"{', '.join(changed)} changed; waiting for the running pull or re-screen to finish "
+                        "before restarting.")
+                    waiting = True
+                continue
+            sleep(0.3)                     # let an editor finish saving several files
+            seen, waiting, crashed = {**now, **code_snapshot(folder)}, False, False
+            if code is None:
+                say(f"{', '.join(changed)} changed; restarting the tracker.")
+                _stop(proc)
+                sleep(0.5)                 # let the port go
+            else:
+                say(f"{', '.join(changed)} changed; starting the tracker again.")
+            proc = start()
+    except KeyboardInterrupt:
+        _stop(proc)
+        return 130
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Start the job tracker at a chosen version.")
     ap.add_argument("--version", "-v", help="a release (e.g. 1.6.0), 'latest' (default) or 'local'")
     ap.add_argument("--list", action="store_true", help="list the releases and exit")
+    ap.add_argument("--no-reload", action="store_true",
+                    help="with --version local: don't restart when the code changes")
     ap.add_argument("script", nargs="?", default="serve.py", choices=SCRIPTS,
                     help="what to run at that version (default serve.py, the web app)")
     ap.add_argument("args", nargs=argparse.REMAINDER, help="arguments for the script")
@@ -241,6 +331,12 @@ def main(argv=None) -> int:
             "folder's virtual environment.")
     say(f"Job Tracker {label} ({folder})")
     cmd = [sys.executable, str(folder / a.script), *a.args]
+    # Your own code: restart the web app whenever you save a change (off with --no-reload
+    # or JOBS_RELOAD=0). Releases don't change, so they just run.
+    reload = (label == LOCAL and a.script in ("serve.py", "app.py") and not a.no_reload
+              and os.environ.get("JOBS_RELOAD", "1") != "0")
+    if reload:
+        return run_with_reload(cmd, folder, child_env(label))
     try:
         return subprocess.call(cmd, cwd=str(folder), env=child_env(label))
     except KeyboardInterrupt:

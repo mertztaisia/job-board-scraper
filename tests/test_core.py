@@ -40,6 +40,13 @@ class TempDB(unittest.TestCase):
         db.BASE_DIR = self.tmp / "resumes"
         db.BASE_DIR.mkdir()
         daily_jobs.HERE = self.tmp            # raw scrape cache goes here, not results/
+        # Tests never fetch real job pages: LinkedIn and ZipRecruiter pages "fail" (no
+        # description) unless a test sets its own fetcher, and nothing waits between pages.
+        self._saved_fetch = (daily_jobs._zip_fetcher, daily_jobs._linkedin_fetcher,
+                             daily_jobs.ZIP_PAUSE, daily_jobs.LINKEDIN_PAUSE, daily_jobs.ZIP_BACKOFF)
+        daily_jobs._zip_fetcher = daily_jobs._linkedin_fetcher = lambda: (lambda job: {})
+        daily_jobs.ZIP_PAUSE = daily_jobs.LINKEDIN_PAUSE = (0, 0)
+        daily_jobs.ZIP_BACKOFF = 0
         db._initialized.clear()
         self.conn = db.connect()
         db.save_prefs(self.conn, TEST_PREFS)
@@ -48,6 +55,8 @@ class TempDB(unittest.TestCase):
     def tearDown(self):
         self.conn.close()
         db.DB_PATH, settings.BACKUP_DIR, db.BASE_DIR, daily_jobs.HERE = self._saved
+        (daily_jobs._zip_fetcher, daily_jobs._linkedin_fetcher, daily_jobs.ZIP_PAUSE,
+         daily_jobs.LINKEDIN_PAUSE, daily_jobs.ZIP_BACKOFF) = self._saved_fetch
         db._initialized.clear()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -791,7 +800,7 @@ class NoLimitTests(TempDB):
         class DF:
             def to_dict(self, _): return []
             def __len__(self): return 0
-        fake.scrape_jobs = lambda **kw: calls.append(kw["results_wanted"]) or DF()
+        fake.scrape_jobs = lambda **kw: calls.append(kw) or DF()
         saved, sleep = sys.modules.get("jobspy"), daily_jobs.time.sleep
         sys.modules["jobspy"], daily_jobs.time.sleep = fake, (lambda s: None)
         try:
@@ -804,8 +813,12 @@ class NoLimitTests(TempDB):
                 sys.modules["jobspy"] = saved
             else:
                 del sys.modules["jobspy"]
-        self.assertEqual(set(calls[:2]), {25})
-        self.assertEqual(set(calls[2:]), {daily_jobs.NO_LIMIT_RESULTS})
+        half = len(calls) // 2                 # each search: LinkedIn, and the other boards
+        self.assertEqual({c["results_wanted"] for c in calls[:half]}, {25})
+        self.assertEqual({c["results_wanted"] for c in calls[half:]}, {daily_jobs.NO_LIMIT_RESULTS})
+        # LinkedIn is searched without opening job pages; the other boards as before
+        self.assertEqual({(tuple(c["site_name"]), c["fetch_description"]) for c in calls},
+                         {(("linkedin",), False), (("indeed", "zip_recruiter"), True)})
         self.assertTrue(db.validate_prefs({**p, "results_all": "yes"}))
 
 
@@ -919,6 +932,7 @@ class ZipRecruiterDescriptionTests(TempDB):
     """Missing ZipRecruiter descriptions are fetched again, slowly (no network here)."""
 
     def test_paced_and_gives_up_after_repeated_refusals(self):
+        daily_jobs.ZIP_PAUSE, daily_jobs.ZIP_BACKOFF = (4.0, 8.0), 30.0       # real pacing (restored after)
         sleeps, answers = [], iter([{"description": "one"}, {}, {"description": "three"}, {}, {}, {}, {"description": "never"}])
         jobs = [{"job_url": f"https://zip/{i}"} for i in range(7)]
         st = daily_jobs.fill_zip_descriptions(jobs, log=lambda *_: None, fetch=lambda j: next(answers), sleep=sleeps.append)
@@ -945,6 +959,41 @@ class ZipRecruiterDescriptionTests(TempDB):
         self.assertEqual(res["zip_descriptions"]["fetched"], 1)
         d = self.conn.execute("SELECT description FROM roles WHERE job_url='https://zip/keep'").fetchone()[0]
         self.assertEqual(d, "Full text. 2+ years of experience.")
+
+    def test_linkedin_pages_only_for_listings_worth_keeping(self):
+        from jobspy.model import CompensationInterval, JobType
+        opened = []
+        pages = {
+            "https://www.linkedin.com/jobs/view/1000001": "Build APIs. 2+ years of experience required.",
+            "https://www.linkedin.com/jobs/view/1000004": "Lead our platform. 8+ years of experience required.",
+        }
+
+        def fetch(job):
+            opened.append(job["job_url"])
+            return {"description": pages.get(job["job_url"], "Text."), "job_type": [JobType.FULL_TIME],
+                    "interval": CompensationInterval.YEARLY, "job_level": "mid-senior level"}
+        daily_jobs._linkedin_fetcher = lambda: fetch
+        li = lambda n, **kw: job(**{"site": "linkedin", "job_url": f"https://www.linkedin.com/jobs/view/{n}",
+                                    "description": None, **kw})
+        have, _ = db.upsert_role(self.conn, li(1000002, title="Platform Engineer", description="Already here."))
+        db.mark_seen(self.conn, ["https://www.linkedin.com/jobs/view/1000003"])
+        self.conn.commit()
+        res = run_pull([
+            li(1000001),                                                   # new and fits: opened
+            li(1000002, title="Platform Engineer"),                        # already in the tracker
+            li(1000003, title="Data Engineer"),                            # seen in an earlier pull
+            li(1000004, title="Backend Engineer"),                         # fits so far; its page says 8+ years
+            li(1000005, title="Senior Software Engineer"),                 # ruled out by title words
+            li(1000006, title="Software Engineer", location="Denver, CO"),  # ruled out by location
+        ])
+        self.assertEqual(opened, ["https://www.linkedin.com/jobs/view/1000001",
+                                  "https://www.linkedin.com/jobs/view/1000004"])
+        self.assertEqual(res["descriptions"]["linkedin"]["fetched"], 2)
+        added = {r["job_url"]: r for r in map(dict, self.conn.execute("SELECT job_url, description, job_type FROM roles"))}
+        self.assertEqual(added["https://www.linkedin.com/jobs/view/1000001"]["job_type"], "fulltime")   # plain values
+        self.assertIn("2+ years", added["https://www.linkedin.com/jobs/view/1000001"]["description"])
+        self.assertNotIn("https://www.linkedin.com/jobs/view/1000004", added)                    # 8+ years: filtered out
+        self.assertEqual(res["added"], 1)
 
     def test_backfill_existing_roles(self):
         rid, _ = db.upsert_role(self.conn, job(site="zip_recruiter", job_url="https://zip/old", description=None))
@@ -1660,6 +1709,94 @@ class VersionTests(TempDB):
             self.assertTrue(Path(env["JOBS_RESUME_DIR"]).is_absolute())
         finally:
             launch.settings.DB_PATH, launch.release_schema = saved
+
+    def reload_run(self, steps, busy=lambda: False):
+        """Run launch.run_with_reload against a temp folder with a fake process. steps: one
+        function per tick (it may edit files or change the process); then Ctrl-C."""
+        import os
+        import launch
+        folder = self.tmp / "code"
+        folder.mkdir(exist_ok=True)
+        (folder / "app.py").write_text("x = 1")
+        started = []
+
+        class Proc:
+            def __init__(self):
+                self.code = None
+                self.stopped = False
+
+            def poll(self):
+                return self.code
+
+            def terminate(self):
+                self.stopped, self.code = True, -1
+
+            def wait(self, timeout=None):
+                return self.code
+
+            kill = terminate
+
+        def start():
+            started.append(Proc())
+            return started[-1]
+        ticks = iter(steps)
+        tick = [0]
+
+        def sleep(seconds):
+            if seconds < 1:          # the short waits inside a restart
+                return
+            tick[0] += 1
+            step = next(ticks, None)
+            if step is None:
+                raise KeyboardInterrupt
+            step(folder, started)
+        saved_say = launch.say
+        launch.say = lambda msg: None
+        self.addCleanup(setattr, launch, "say", saved_say)
+        code = launch.run_with_reload(["x"], folder, {}, sleep=sleep, busy=busy, start=start)
+        return code, started
+
+    @staticmethod
+    def edit(folder, started, _n=[0]):
+        import os
+        _n[0] += 10
+        os.utime(folder / "app.py", (1_000_000 + _n[0], 1_000_000 + _n[0]))
+
+    def test_reload_restarts_on_a_code_change(self):
+        nothing = lambda f, s: None
+        code, started = self.reload_run([nothing, self.edit, nothing])
+        self.assertEqual((code, len(started)), (130, 2))
+        self.assertTrue(started[0].stopped)                                    # the old server was stopped
+
+    def test_reload_waits_for_a_running_pull(self):
+        busy = [True]
+        code, started = self.reload_run([self.edit, lambda f, s: None, lambda f, s: busy.clear()],
+                                        busy=lambda: bool(busy))
+        self.assertEqual(len(started), 2)                                      # restarted once the pull ended
+
+    def test_reload_after_a_crash_waits_for_the_fix(self):
+        def crash(folder, started):
+            started[-1].code = 1
+        code, started = self.reload_run([crash, lambda f, s: None, lambda f, s: None, self.edit])
+        self.assertEqual(len(started), 2)                                      # not restarted until the save
+
+    def test_only_local_code_is_watched(self):
+        import launch
+        calls = []
+        saved = (launch.resolve, launch.check_database, launch.run_with_reload, launch.subprocess.call, launch.say)
+        launch.resolve = lambda v: (v or "1.8.0", launch.HERE)
+        launch.check_database = lambda v: None
+        launch.run_with_reload = lambda *a, **k: calls.append("reload") or 0
+        launch.subprocess.call = lambda *a, **k: calls.append("plain") or 0
+        launch.say = lambda msg: None
+        try:
+            launch.main(["--version", "local"])
+            launch.main(["--version", "local", "--no-reload"])
+            launch.main(["--version", "1.8.0"])
+            launch.main(["--version", "local", "jobs.py", "list"])
+        finally:
+            launch.resolve, launch.check_database, launch.run_with_reload, launch.subprocess.call, launch.say = saved
+        self.assertEqual(calls, ["reload", "plain", "plain", "plain"])
 
     def test_each_release_says_which_schema_it_uses(self):
         import launch

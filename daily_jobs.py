@@ -115,34 +115,51 @@ def fetch_jobs(prefs: dict, log=print, stats: dict | None = None) -> list[dict]:
             # hours_old is set, so location="Remote" covers Indeed.
             runs.append(dict(search_term=term, location="Remote", is_remote=True))
 
+    # LinkedIn is searched without opening each job's page: JobSpy would otherwise load
+    # every result's page for its description (up to results_per_search per search), which
+    # is most of a pull's time and gets LinkedIn to block it part way. The pull then fetches
+    # descriptions only for listings worth keeping (see _run). Other boards as before.
+    sites = list(prefs["sites"])
+    groups = ([(["linkedin"], False)] if "linkedin" in sites else []) + \
+        ([([x for x in sites if x != "linkedin"], True)] if any(x != "linkedin" for x in sites) else [])
+
+    def search(site_names, fetch_description, r):
+        return scrape_jobs(
+            site_name=site_names,
+            results_wanted=results_wanted,
+            hours_old=int(prefs.get("posted_within_hours") or 24),
+            country_indeed="USA",
+            job_type=job_type if not r["is_remote"] else None,
+            fetch_description=fetch_description,
+            enforce_annual_salary=True,
+            description_format="markdown",
+            verbose=0,
+            **r,
+        )
+
+    from concurrent.futures import ThreadPoolExecutor
     jobs: dict[str, dict] = {}
     for r in runs:
         label = f"{r['search_term']} @ {r['location']}"
         log(f"Searching: {label}")
         stats["searches"] += 1
-        try:
-            df = scrape_jobs(
-                site_name=prefs["sites"],
-                results_wanted=results_wanted,
-                hours_old=int(prefs.get("posted_within_hours") or 24),
-                country_indeed="USA",
-                job_type=job_type if not r["is_remote"] else None,
-                fetch_description=True,
-                enforce_annual_salary=True,
-                description_format="markdown",
-                verbose=0,
-                **r,
-            )
-        except Exception as e:  # one bad site/search shouldn't kill the run
-            log(f"  ! {label} failed: {e}")
-            stats["failed"].append(f"{label}: {str(e)[:200]}")
-            continue
-        for row in df.to_dict("records"):
-            row = {k: _clean(v) for k, v in row.items()}
-            key = row.get("job_url") or row.get("id")
-            if key:
-                jobs.setdefault(key, row)
-        log(f"  {len(df)} results")
+        found = 0
+        with ThreadPoolExecutor(max_workers=max(1, len(groups))) as pool:
+            futures = [(names, pool.submit(search, names, fetch, r)) for names, fetch in groups]
+            for names, fut in futures:
+                try:
+                    df = fut.result()
+                except Exception as e:  # one bad site/search shouldn't kill the run
+                    log(f"  ! {label} ({', '.join(names)}) failed: {e}")
+                    stats["failed"].append(f"{label} ({', '.join(names)}): {str(e)[:200]}")
+                    continue
+                found += len(df)
+                for row in df.to_dict("records"):
+                    row = {k: _clean(v) for k, v in row.items()}
+                    key = row.get("job_url") or row.get("id")
+                    if key:
+                        jobs.setdefault(key, row)
+        log(f"  {found} results")
         time.sleep(2)
     return list(jobs.values())
 
@@ -158,6 +175,7 @@ ZIP_PAUSE = (4.0, 8.0)        # seconds between job pages
 ZIP_BACKOFF = 30.0            # extra wait after a refused request (grows with each in a row)
 ZIP_MAX_FAILURES = 3          # give up for this pull after this many refusals in a row
 ZIP_MAX_FETCHES = 50          # at most this many per pull, to keep pulls from running long
+PULL_MAX_FETCHES = 50         # job pages a pull fetches per board (LinkedIn, ZipRecruiter)
 
 
 def _zip_fetcher():
@@ -212,6 +230,17 @@ def _description_sites() -> dict:
     }
 
 
+def _plain_value(v):
+    """A job-page detail as the plain value a search result has: JobSpy gives some as
+    enums or lists of enums ([JobType.FULL_TIME] -> 'fulltime', CompensationInterval.YEARLY -> 'yearly')."""
+    if isinstance(v, (list, tuple)) and v and all(hasattr(x, "value") for x in v):
+        return ", ".join(str(_plain_value(x)) for x in v)
+    if hasattr(v, "value") and not isinstance(v, (str, int, float)):
+        v = v.value
+        return v[0] if isinstance(v, tuple) else v
+    return v
+
+
 def fill_descriptions(jobs: list[dict], label: str, make_fetcher, pause, limit: int,
                       log=print, fetch=None, sleep=time.sleep) -> dict:
     """Fetch missing descriptions for these listings from one board, a few seconds apart,
@@ -241,6 +270,7 @@ def fill_descriptions(jobs: list[dict], label: str, make_fetcher, pause, limit: 
             details = {}
         if details.get("description"):
             for k, v in details.items():
+                v = _plain_value(v)
                 if v is not None and not job.get(k):
                     job[k] = v
             stats["fetched"] += 1
@@ -606,15 +636,20 @@ def _run(reuse, ignore_seen, use_ai, trigger, log) -> dict:
                 f"location(s) on {', '.join(prefs['sites'])}")
             jobs = fetch_jobs(prefs, log, fetch_stats)
 
-        # ZipRecruiter listings that came back without a description (see
-        # fill_zip_descriptions): fetch them again, slowly, but only the ones we'd keep:
-        # new listings that pass the filters, or roles we already have with no description,
-        # and not when another board's copy of the same posting has a description.
+        # LinkedIn (searched without its job pages, see fetch_jobs) and ZipRecruiter (which
+        # refuses JobSpy's rapid page requests) listings without a description: fetch them,
+        # a few seconds apart, but only the ones worth it. Not postings you already have with
+        # a description, or have seen before; not ones your rules rule out from what the
+        # listing shows (title, place, company, type, listed pay; no AI); not when another
+        # board's copy of the same posting has a description. Roles you already have that
+        # still lack one are fetched too. Years of experience are only in the description,
+        # so every listing is checked again with it before it's added.
         described = {(db._norm(j.get("title")), db.company_core(j.get("company")))
                      for j in jobs if (j.get("description") or "").strip()}
-        need_zip = []
+        desc_sites = _description_sites()
+        need: dict[str, list] = {site: [] for site in desc_sites}
         for job in jobs:
-            if (job.get("site") != "zip_recruiter" or (job.get("description") or "").strip()
+            if (job.get("site") not in desc_sites or (job.get("description") or "").strip()
                     or not job.get("job_url")
                     or (db._norm(job.get("title")), db.company_core(job.get("company"))) in described):
                 continue
@@ -622,11 +657,17 @@ def _run(reuse, ignore_seen, use_ai, trigger, log) -> dict:
                                         location=job.get("location"), job_url_direct=job.get("job_url_direct"))
             if existing is not None:
                 if not existing["description"]:
-                    need_zip.append(job)
+                    need[job["site"]].append(job)
             elif (ignore_seen or not db.is_seen(conn, job.get("job_url") or job.get("id"))) \
                     and evaluate(job, today, prefs)[0]:
-                need_zip.append(job)
-        zip_stats = fill_zip_descriptions(need_zip, log)
+                need[job["site"]].append(job)
+        desc_stats = {}
+        for site, listings in need.items():
+            if listings:
+                cfg = desc_sites[site]
+                desc_stats[site] = fill_descriptions(listings, cfg["label"], cfg["make_fetcher"], cfg["pause"],
+                                                     PULL_MAX_FETCHES, log=log)
+        zip_stats = desc_stats.get("zip_recruiter", {"tried": 0, "fetched": 0, "stopped_early": False})
         if not reuse:
             raw_file.write_text(json.dumps(jobs, default=str), encoding="utf-8")
 
@@ -695,7 +736,7 @@ def _run(reuse, ignore_seen, use_ai, trigger, log) -> dict:
         result.update(scraped=len(jobs), kept=len(kept), added=len(new_ids), rejected=rejected,
                       sites=sites, details_filled=len(filled_ids), descriptions_added=len(described),
                       searches=fetch_stats.get("searches", 0), failed_searches=fetch_stats.get("failed", []),
-                      zip_descriptions=zip_stats)
+                      zip_descriptions=zip_stats, descriptions=desc_stats)
 
         ai = {"screened": 0, "rejected": 0, "unsure": 0, "input_tokens": 0,
               "output_tokens": 0, "cost": 0.0, "errors": 0, "skipped": None}

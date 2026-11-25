@@ -115,8 +115,13 @@ function Test-IsTracker([int]$ProcessId) {
 }
 
 function Stop-Tracker {
+    # The launcher first (with -Version local it watches the code and would start the
+    # server again), then the server itself.
+    $launchers = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine.IndexOf($Launch, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+    foreach ($l in $launchers) { Stop-Process -Id $l.ProcessId -Force -ErrorAction SilentlyContinue }
     $pids = Get-ServerPids
-    if (-not $pids) { Write-Host "Not running."; return }
+    if (-not $pids) { Write-Host $(if ($launchers) { "Stopped." } else { "Not running." }); return }
     $stopped = $false
     foreach ($p in $pids) {
         if (Test-IsTracker $p) {

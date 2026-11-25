@@ -1440,6 +1440,20 @@
     }
   }
 
+  // Job pages a pull opened for descriptions (LinkedIn, ZipRecruiter): only for new listings
+  // that pass your rules, or roles you have that still lack one.
+  function descriptionRows(r) {
+    const n = (x) => (x ?? 0).toLocaleString();
+    const LABELS = { linkedin: "LinkedIn", zip_recruiter: "ZipRecruiter" };
+    const per = r.descriptions || (r.zip_descriptions ? { zip_recruiter: r.zip_descriptions } : {});
+    return Object.entries(per).filter(([, v]) => v && (v.tried || v.error)).map(([site, v]) => {
+      const name = LABELS[site] || site;
+      return `<dt>${esc(name)} descriptions</dt><dd>${n(v.fetched)} of ${n(v.tried)} fetched${
+        v.error ? `<div class="cell-dim">Couldn't start: ${esc(v.error)}</div>`
+        : v.stopped_early ? `<div class="cell-dim">${esc(name)} kept refusing, so it stopped early. Use <b>Pull new roles ▾ → Fetch missing descriptions</b> later for the rest.</div>` : ""}</dd>`;
+    }).join("");
+  }
+
   // After a pull: what it searched, what it found, and what happened to each posting.
   async function showPullSummary(s) {
     const r = s.result || {}, ai = r.ai || {};
@@ -1468,8 +1482,7 @@
             + `${r.descriptions_added ? ` (${n(r.descriptions_added)} got a description)` : ""}</div>` : ""}</dd>
           <dt>Filtered out</dt><dd>${n(filteredTotal)}${filtered.length ? `<div class="cell-dim">${filtered.slice(0, 5)
             .map(([k, v]) => `${esc(k)}: ${n(v)}`).join("<br>")}${filtered.length > 5 ? "<br>…" : ""}</div>` : ""}</dd>
-          ${r.zip_descriptions && r.zip_descriptions.tried ? `<dt>ZipRecruiter descriptions</dt><dd>${n(r.zip_descriptions.fetched)} of ${n(r.zip_descriptions.tried)} fetched${
-            r.zip_descriptions.stopped_early ? '<div class="cell-dim">ZipRecruiter kept refusing, so it stopped early. Use <b>Pull new roles ▾ → Fetch missing descriptions</b> later for the rest.</div>' : ""}</dd>` : ""}
+          ${descriptionRows(r)}
           <dt>Passed filters</dt><dd>${n(r.kept)}</dd>
           <dt>AI screen</dt><dd>${aiLine}</dd>
         </dl>
