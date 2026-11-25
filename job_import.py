@@ -14,7 +14,9 @@ earlier ones left blank:
      Google Jobs (title, company, location, pay, date, description), then the page's
      meta tags and its readable text (pay and years are read from the text with the
      same rules as a pull).
-  3. Optionally Claude reads the page and fills in, or tidies up, what's left.
+  3. Optionally Claude reads the page and fills in what's left. It never writes the
+     description: it only marks where the description starts and ends in the page
+     text, and that span is copied exactly as it is (see cut_description).
 
 Only public pages can be read: links to this computer or your local network are
 refused, and pages behind a sign-in come back as a clear message.
@@ -160,7 +162,7 @@ def place(city=None, region=None, country=None) -> str | None:
 
 
 def html_to_markdown(fragment: str | None) -> str | None:
-    """Job description HTML -> tidy Markdown (also undoes HTML that was escaped twice)."""
+    """Job description HTML -> Markdown, same words (also undoes HTML that was escaped twice)."""
     if not fragment or not str(fragment).strip():
         return None
     text = str(fragment)
@@ -489,10 +491,12 @@ AI_SCHEMA = {
         "years_max": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
         "job_type": {"anyOf": [{"type": "string", "enum": list(JOB_TYPES)}, {"type": "null"}]},
         "date_posted": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-        "description": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "description_starts_with": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "description_ends_with": {"anyOf": [{"type": "string"}, {"type": "null"}]},
     },
     "required": ["is_job_posting", "problem", "title", "company", "location", "is_remote", "pay_min", "pay_max",
-                 "years_min", "years_max", "job_type", "date_posted", "description"],
+                 "years_min", "years_max", "job_type", "date_posted", "description_starts_with",
+                 "description_ends_with"],
     "additionalProperties": False,
 }
 
@@ -506,8 +510,57 @@ Rules:
 - pay_min/pay_max: the posted base pay range as yearly US dollars (hourly x 2080, monthly x 12). null if there's no pay range or it isn't in USD.
 - years_min/years_max: the REQUIRED years of experience ("3+ years" -> 3 and null; "3-5 years" -> 3 and 5), not "nice to have".
 - date_posted: YYYY-MM-DD if the page states when it was posted.
-- description: the full job description copied from the page in Markdown (headings, bullet lists), keeping the original wording. Include the sections about the company, the role, responsibilities, requirements, benefits and pay. Leave out navigation, cookie notices, application form fields, "similar jobs" and other listings. Don't summarize or shorten it.
+- You never write out the job description. Instead, mark where it is in the page text: description_starts_with is the first 8-15 words of the job description and description_ends_with is its last 8-15 words, each copied character for character from the page text (same words, same order, no changes). The description runs from its first section (usually about the company or the role) through responsibilities, requirements, benefits and pay; it leaves out navigation, cookie notices, application form fields, "similar jobs" and other listings. When unsure where it ends, include more rather than less: a pay or salary range, benefits, or an equal-opportunity or AI-in-hiring note right after the description belongs to it. Use null for both if you can't tell or if you're told the description was already found.
 - If "Already found" values are given, keep them unless the page clearly shows they're wrong; fill in what's missing."""
+
+
+_SKIP = set("*_`#>\\")
+_SAME = {"\u2019": "'", "\u2018": "'", "\u201c": '"', "\u201d": '"', "\u2013": "-", "\u2014": "-", "\xa0": " "}
+
+
+def _normalized(text: str) -> tuple[str, list[int]]:
+    """text lower-cased, Markdown marks dropped, quotes/dashes made plain and runs of
+    whitespace made one space, with each character's position in the original."""
+    out, where, space = [], [], False
+    for i, ch in enumerate(text):
+        ch = _SAME.get(ch, ch)
+        if ch in _SKIP:
+            continue
+        if ch.isspace():
+            if out and not space:
+                out.append(" ")
+                where.append(i)
+            space = True
+            continue
+        space = False
+        out.append(ch.lower())
+        where.append(i)
+    return "".join(out), where
+
+
+def cut_description(text: str, starts_with: str, ends_with: str) -> str | None:
+    """The part of text from the phrase starts_with through the phrase ends_with, exactly
+    as it is in text (the AI only names where the job description begins and ends, so no
+    words are ever changed). None if either phrase isn't found, or the part is too short to
+    be a description."""
+    norm, where = _normalized(text)
+    a, b = _normalized(starts_with)[0].strip(), _normalized(ends_with)[0].strip()
+    if not a or not b:
+        return None
+    i = norm.find(a)
+    if i < 0:
+        return None
+    j = norm.find(b, i)
+    if j < 0:
+        return None
+    start, end = where[i], where[j + len(b) - 1] + 1
+    line_start = text.rfind("\n", 0, start) + 1               # keep a heading's "## " or a bullet's "- "
+    if not text[line_start:start].strip(" #*_->+0123456789."):
+        start = line_start
+    while end < len(text) and text[end] in "*_`)]":            # and closing ** or )
+        end += 1
+    cut = text[start:end].strip()
+    return cut if len(cut) >= 200 else None
 
 
 def _ai_available() -> tuple[bool, str | None]:
@@ -539,10 +592,11 @@ def ai_extract(url: str, page_title: str | None, text: str, found: dict, client=
     known = {k: v for k, v in found.items() if k in FIELDS and k not in ("description", "job_url", "site")}
     content = (f"Page: {url}\nPage title: {page_title or '(none)'}\n"
                + (f"Already found: {json.dumps(known, default=str)}\n" if known else "")
-               + ("The description was already found: return null for description.\n" if have_description else "")
+               + ("The description was already found: return null for description_starts_with and "
+                  "description_ends_with.\n" if have_description else "")
                + f"\nPage text:\n{text[:AI_TEXT_CHARS]}")
     resp = cli.messages.create(
-        model=model, max_tokens=16000, system=AI_SYSTEM,
+        model=model, max_tokens=4000, system=AI_SYSTEM,
         output_config={"effort": "low", "format": {"type": "json_schema", "schema": AI_SCHEMA}},
         messages=[{"role": "user", "content": content}])
     usage = {"model": model, "input_tokens": resp.usage.input_tokens, "output_tokens": resp.usage.output_tokens}
@@ -554,7 +608,11 @@ def ai_extract(url: str, page_title: str | None, text: str, found: dict, client=
     data = json.loads(next((b.text for b in resp.content if b.type == "text"), "{}"))
     if not data.get("is_job_posting", True):
         raise ImportProblem(f"The AI says this isn't a job posting: {data.get('problem') or 'no details'}.")
-    out = {k: data.get(k) for k in FIELDS if data.get(k) not in (None, "")}
+    # Every field but the description (the AI only says where that is; see cut_description).
+    out = {k: data.get(k) for k in FIELDS if k != "description" and data.get(k) not in (None, "")}
+    start, end = data.get("description_starts_with"), data.get("description_ends_with")
+    if isinstance(start, str) and isinstance(end, str) and start.strip() and end.strip():
+        out["_description_bounds"] = (start, end)
     if "date_posted" in out:
         out["date_posted"] = _date(out["date_posted"])
     for k in ("pay_min", "pay_max", "years_min", "years_max"):
@@ -755,8 +813,17 @@ def import_from_url(url: str, use_ai: bool = False, fetch=None, ai=None, render=
                 found = dict(fields)
                 values, usage = (ai or ai_extract)(url, page_title, text or fields.get("description", ""), found,
                                                    have_description=sources.get("description") in STRONG)
+                values = dict(values)
+                values.pop("description", None)        # never AI-written text (see cut_description)
+                bounds = values.pop("_description_bounds", None)
                 weak = [k for k in values if sources.get(k) not in STRONG]
                 take(values, "ai", override=weak)
+                if bounds and sources.get("description") == "page":
+                    cut = cut_description(fields["description"], *bounds)
+                    if cut:
+                        fields["description"] = cut
+                        messages.append("The AI marked where the job description starts and ends on the page; "
+                                        "the text in between is copied exactly as it is.")
                 ai_info = {"used": True, **usage}
                 _log_ai_use(usage, url)
             except ImportProblem as e:

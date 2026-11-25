@@ -384,7 +384,8 @@ def import_link():
     """Read a job posting link and propose Add role values (nothing is saved). Body:
     {url, use_ai}. Job boards use their own data; any other public page is read from its
     JobPosting data, meta tags and text (rendered in a headless browser if it's built by
-    JavaScript); with use_ai, Claude fills in or tidies up the rest."""
+    JavaScript); with use_ai, Claude fills in the rest. The description is always the page's own
+    text (the AI only marks where it starts and ends)."""
     import job_import
     data = body()
     if not isinstance(data.get("url"), str):

@@ -1229,7 +1229,8 @@ JOB_PAGE = """<html><head><title>Backend Engineer | Globex</title>
 PLAIN_PAGE = """<html><head><title>Data Engineer - Careers</title></head><body>
 <nav>Home Jobs About</nav><main><h1>Data Engineer</h1>
 <p>We're hiring a data engineer to build our pipelines. You have 3-5 years of experience writing Python.</p>
-<p>Pay: $150,000 - $180,000 a year. """ + "Plenty more about the role and the team. " * 50 + """</p></main>
+<p>Pay: $150,000 - $180,000 a year. """ + "Plenty more about the role and the team. " * 50 + """</p>
+<p>We offer great benefits.</p><p>Apply now. First name, last name.</p></main>
 <footer>Cookie settings</footer></body></html>"""
 
 SPA_SHELL = "<html><head><title>Loading</title></head><body><div id='root'></div><script>app()</script></body></html>"
@@ -1326,6 +1327,38 @@ class JobImportTests(TempDB):
         finally:
             job_import._ai_available = orig
         self.assertEqual((r["fields"]["title"], r["fields"]["company"]), ("Senior Data Engineer", "Initech"))
+
+    def with_ai(self, page, reply):
+        import job_import
+        orig = job_import._ai_available
+        job_import._ai_available = lambda: (True, None)
+        try:
+            return self.run_import({"*": page}, use_ai=True,
+                                   ai=lambda *a, **k: (dict(reply), {"model": "m", "input_tokens": 1, "output_tokens": 1, "cost": 0}))[0]
+        finally:
+            job_import._ai_available = orig
+
+    def test_ai_never_writes_the_description(self):
+        import job_import
+        full = self.run_import({"*": PLAIN_PAGE})[0]["fields"]["description"]
+        # The AI marks the span; the text comes from the page, character for character.
+        r = self.with_ai(PLAIN_PAGE, {"description": "REWRITTEN BY AI",
+                                      "_description_bounds": ("We're hiring a data engineer", "We offer great benefits.")})
+        d = r["fields"]["description"]
+        self.assertNotIn("REWRITTEN", d)
+        self.assertTrue(d.startswith("We're hiring a data engineer"))
+        self.assertTrue(d.endswith("We offer great benefits."))
+        self.assertNotIn("Apply now", d)                        # the page's leftovers are cut off
+        self.assertIn(d, full)                                  # an exact piece of the page's own text
+        self.assertEqual(r["sources"]["description"], "page")
+        # Phrases that aren't on the page: the whole page text is kept.
+        r = self.with_ai(PLAIN_PAGE, {"_description_bounds": ("words that aren't there", "We offer great benefits.")})
+        self.assertEqual(r["fields"]["description"], full)
+        # A description from the page's job data is never trimmed or replaced.
+        r = self.with_ai(JOB_PAGE, {"description": "REWRITTEN", "_description_bounds": ("About us", "APIs")})
+        self.assertEqual(r["fields"]["description"],
+                         self.run_import({"*": JOB_PAGE})[0]["fields"]["description"])
+        self.assertEqual(job_import.AI_SCHEMA["properties"].get("description"), None)
 
     def test_ai_unavailable_is_explained(self):
         import job_import
