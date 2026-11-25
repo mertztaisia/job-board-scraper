@@ -1135,7 +1135,7 @@
     const ai = aiAvailable();
     $("#importAi").checked = ai && store.get("importAi", true);
     $("#importAi").disabled = !ai;
-    $("#importAiNote").textContent = ai ? "Fills in what the page doesn't state plainly. The description is always copied from the page word for word (about $0.001)"
+    $("#importAiNote").textContent = ai ? "Fills in fields through job board APIs and AI if needed (about $0.001)"
       : (META.ai.configured ? "AI is turned off in Preferences" : "Needs an Anthropic API key (Preferences → AI screening)");
     form.screen_after.checked = ai;
     form.screen_after.disabled = !ai;
