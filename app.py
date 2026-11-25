@@ -379,6 +379,22 @@ def del_qa(qa_id):
         return _role_or_404(c, rid) if rid else abort(404)
 
 
+@app.post("/api/import")
+def import_link():
+    """Read a job posting link and propose Add role values (nothing is saved). Body:
+    {url, use_ai}. Job boards use their own data; any other public page is read from its
+    JobPosting data, meta tags and text (rendered in a headless browser if it's built by
+    JavaScript); with use_ai, Claude fills in or tidies up the rest."""
+    import job_import
+    data = body()
+    if not isinstance(data.get("url"), str):
+        return jsonify(error="Paste the link to a job posting."), 400
+    try:
+        return jsonify(job_import.import_from_url(data["url"], use_ai=data.get("use_ai") is True))
+    except job_import.ImportProblem as e:
+        return jsonify(error=str(e)), 422
+
+
 @app.get("/api/check")
 def check_duplicates():
     """Roles at the same company (or same URL), shown while adding a role."""

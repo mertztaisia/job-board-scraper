@@ -149,7 +149,14 @@ Then create `.env` and run `service.ps1 install`.
 - **The role panel** also has Offer and Questions & answers cards.
 - **Archive** (button in the role panel) hides a role from the list, search and counts. Roles that have been **Not a fit** for 7 days are archived automatically; change the number of days or turn it off in Preferences → Archiving. A role you unarchive yourself stays unarchived. Turn on **Include archived** in the sidebar to see archived roles again. It turns itself off on every reload, and archived roles aren't loaded at all until you turn it on.
 - **Keys:** `j` / `k` move to the next or previous role. `Esc` closes the panel.
-- **Add role** is for jobs you found yourself. It warns you if you already have a role at that company.
+- **Add role** is for jobs you found yourself. It warns you if you already have a role at that company. Choose how to fill it in:
+  - **From a link:** paste the link to a job posting and press **Fill in from link**. The form below fills in (filled fields are marked) for you to check before you add the role; nothing is saved until then.
+    - **Indeed** links use Indeed's job API, and **LinkedIn** links read the public job page (title, company, location, pay, description). **ZipRecruiter** and **Glassdoor** descriptions come from the same readers a pull uses.
+    - **Any other public page** (a company careers page, Greenhouse, Lever, Ashby, Workable…) is read from the job data most career sites publish for Google Jobs, then its title, headings and text; pay and years are found with the same rules as a pull. Pages that build their content with JavaScript are opened in a headless Chrome or Edge (whichever is installed; set `JOBS_BROWSER` to pick one) with a fresh, empty profile, so none of your sign-ins are used.
+    - **Use AI to read the page** (on by default when AI screening is set up; about $0.001) has Claude fill in what the page doesn't state plainly, such as the company or a pay range in the text, and tidy the description. It keeps values that came from the job board or the page's job data. The cost shows in the pull history as an Import run.
+    - Pages behind a sign-in can't be read, and only public web addresses are fetched (links to this computer or your local network are refused).
+  - **Enter manually:** type the details in yourself.
+  - Either way, **Screen this role with AI after adding** (on when AI is set up) assesses its fit once it's added, if it has a description.
 - **Theme:** the half-moon button switches between light and dark.
 
 ## AI screening setup

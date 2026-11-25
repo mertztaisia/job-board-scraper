@@ -1118,16 +1118,98 @@
   }
 
   // ------------------------------------------------------------------ Add dialog
+  // Two ways to add a role: "From a link" (read the posting: job boards, any public careers
+  // page, optionally with AI; you check the filled-in form, then add) or "Enter manually".
+  const aiAvailable = () => META.ai.configured && META.ai_enabled;
+  let importSeq = 0;
   function openAdd() {
     const form = $("#addForm");
     form.reset();
+    importSeq++;   // forget an import still running from last time
     $("#addStatus").innerHTML = Object.entries(STATUSES).map(([k, l]) => `<option value="${k}" ${k === "applied" ? "selected" : ""}>${esc(l)}</option>`).join("");
     $("#addResume").innerHTML = `<option value="">— none —</option>` + RESUMES.map((f, i) => `<option value="${esc(f.path)}" ${i === 0 ? "selected" : ""}>${esc(f.name)}</option>`).join("");
     $("#dupeBox").classList.add("hidden");
+    $$("#addFields .autofilled").forEach((el) => el.classList.remove("autofilled"));
+    $("#importUrl").value = "";
+    setImportStatus("");
+    const ai = aiAvailable();
+    $("#importAi").checked = ai && store.get("importAi", true);
+    $("#importAi").disabled = !ai;
+    $("#importAiNote").textContent = ai ? "Fills in what the page doesn't state plainly and tidies the description (about $0.001)"
+      : (META.ai.configured ? "AI is turned off in Preferences" : "Needs an Anthropic API key (Preferences → AI screening)");
+    form.screen_after.checked = ai;
+    form.screen_after.disabled = !ai;
+    $("#addScreenWrap").classList.toggle("hidden", !ai);
+    setAddMode(store.get("addMode", "link"), true);
     $("#addDialog").classList.remove("hidden");
-    setTimeout(() => form.title.focus(), 30);
   }
-  const closeAdd = () => $("#addDialog").classList.add("hidden");
+  const closeAdd = () => { importSeq++; $("#addDialog").classList.add("hidden"); };
+
+  // In "From a link" mode the form stays hidden until the link has been read (or you choose
+  // to fill it in yourself), so an empty form can't be submitted by accident.
+  let addFilled = false;
+  function setAddMode(mode, fresh) {
+    if (fresh) addFilled = false;
+    store.set("addMode", mode);
+    $$("#addMode button").forEach((b) => b.classList.toggle("on", b.dataset.mode === mode));
+    const link = mode === "link";
+    $("#importPanel").classList.toggle("hidden", !link);
+    const showForm = !link || addFilled;
+    $("#addFields").classList.toggle("hidden", !showForm);
+    $("#addSubmit").classList.toggle("hidden", !showForm);
+    setTimeout(() => (link && !addFilled ? $("#importUrl") : $("#addForm").title).focus(), 30);
+  }
+
+  function setImportStatus(html, kind = "") {
+    const el = $("#importStatus");
+    el.innerHTML = html;
+    el.className = `import-status ${kind} ${html ? "" : "hidden"}`;
+  }
+
+  const IMPORT_SOURCES = { board: "the job board", structured: "the page's job data", page: "the page text", ai: "AI" };
+  async function importFromLink() {
+    const url = $("#importUrl").value.trim();
+    if (!url) { setImportStatus("Paste the link to a job posting first.", "error"); $("#importUrl").focus(); return; }
+    const useAi = $("#importAi").checked && !$("#importAi").disabled;
+    store.set("importAi", $("#importAi").checked);
+    const seq = ++importSeq, btn = $("#importBtn");
+    btn.disabled = true; btn.classList.add("working"); btn.textContent = "Reading the page…";
+    setImportStatus(useAi ? "Reading the page, then asking the AI. This can take up to half a minute."
+      : "Reading the page. Pages built with JavaScript can take a few seconds more.");
+    try {
+      const r = await api("/api/import", { method: "POST", body: { url, use_ai: useAi } });
+      if (seq !== importSeq) return;   // the dialog was closed or reopened meanwhile
+      fillAddForm(r.fields);
+      const used = [...new Set(Object.values(r.sources || {}))].map((x) => IMPORT_SOURCES[x] || x);
+      const n = Object.keys(r.fields).filter((k) => !["job_url", "site"].includes(k)).length;
+      const cost = r.ai && r.ai.used ? ` AI cost ${dollars(r.ai.cost, 4)}.` : "";
+      setImportStatus(`<b>Filled in ${n} field${n === 1 ? "" : "s"}</b> from ${used.length > 1 ? used.slice(0, -1).join(", ") + " and " + used.at(-1) : used[0] || "the page"}.${cost} Check them below, then add the role.`
+        + (r.messages && r.messages.length ? `<ul>${r.messages.map((m) => `<li>${esc(m)}</li>`).join("")}</ul>` : ""));
+      addFilled = true;
+      setAddMode("link");
+      checkDupes();
+    } catch (e) {
+      if (seq !== importSeq) return;
+      setImportStatus(`${esc(e.message)} <a href="#" id="importManual">Enter it manually instead</a>`, "error");
+      const m = $("#importManual");
+      if (m) m.onclick = (ev) => { ev.preventDefault(); $("#addForm").job_url.value = url; setAddMode("manual"); };
+    } finally {
+      if (seq === importSeq) { btn.disabled = false; btn.classList.toggle("working", false); btn.textContent = "Fill in from link"; }
+    }
+  }
+
+  function fillAddForm(fields) {
+    const form = $("#addForm");
+    $$("#addFields .autofilled").forEach((el) => el.classList.toggle("autofilled", false));
+    for (const [k, v] of Object.entries(fields)) {
+      const el = form.elements[k];
+      if (!el || v == null || v === "") continue;
+      if (el.type === "checkbox") el.checked = !!v;
+      else el.value = v;
+      const label = el.closest("label.field, label.switch");
+      if (label && el.type !== "hidden") label.classList.add("autofilled");
+    }
+  }
 
   let dupeT;
   async function checkDupes() {
@@ -1150,12 +1232,23 @@
     for (const [k, v] of fd.entries()) body[k] = v;
     for (const k of ["pay_min", "pay_max", "years_min", "years_max"]) body[k] = body[k] === "" ? null : Number(body[k]);
     body.is_remote = fd.get("is_remote") ? 1 : 0;
+    const screen = !!body.screen_after && aiAvailable() && (body.description || "").trim();
+    body.screen_after = undefined;   // not a role field (JSON leaves it out)
     try {
       const r = await api("/api/roles", { method: "POST", body });
       closeAdd();
-      toast(`Added “${r.title}” at ${r.company}`, "success");
+      toast(`Added “${r.title}” at ${r.company}${screen ? ". AI screening it…" : ""}`, "success");
       await load();
       openRole(r.id);
+      if (screen) {
+        try {
+          const res = await api(`/api/roles/${r.id}/screen`, { method: "POST" });
+          if (current && current.id === r.id) { current = res.role; renderDrawer(); }
+          const lv = matchInfo(res.role.ai_match);
+          toast(`Assessed fit: ${lv.label}${res.role.ai_reason ? ` (${res.role.ai_reason})` : ""}`, "success");
+          load();
+        } catch (err) { toast(`Added, but the AI screen didn't run: ${err.message}`, "error"); }
+      }
     } catch (err) {
       if (err.status === 409 && err.data && err.data.id) {
         closeAdd();
@@ -1631,7 +1724,7 @@
     if (!el) return;
     const d = await api("/api/runs");
     const rows = d.runs.map((r) => `
-      <tr><td>${fmtDate(r.started_at, true)}</td><td>${r.kind === "rescreen" ? "Re-screen" : r.kind === "descriptions" ? "Descriptions" : "Pull"}</td><td>${esc(r.trigger || "")}</td>
+      <tr><td>${fmtDate(r.started_at, true)}</td><td>${r.kind === "rescreen" ? "Re-screen" : r.kind === "descriptions" ? "Descriptions" : r.kind === "import" ? "Import" : "Pull"}</td><td>${esc(r.trigger || "")}</td>
         <td class="num">${r.scraped ?? "—"}</td><td class="num">${r.added ?? "—"}</td><td class="num">${r.ai_screened ?? 0}</td>
         <td class="num">${r.ai_rejected ?? 0}</td><td class="num">${((r.ai_input_tokens || 0) + (r.ai_output_tokens || 0)).toLocaleString()}</td>
         <td class="num">${dollars(r.ai_cost, 4)}</td><td>${esc(r.status || "")}</td></tr>`).join("");
@@ -2137,6 +2230,9 @@
     $$("#addDialog [data-close]").forEach((b) => b.onclick = closeAdd);
     $("#addDialog").addEventListener("mousedown", (e) => { if (e.target.id === "addDialog") closeAdd(); });
     $("#addForm").onsubmit = submitAdd;
+    $("#addMode").addEventListener("click", (e) => { const b = e.target.closest("[data-mode]"); if (b) setAddMode(b.dataset.mode); });
+    $("#importBtn").onclick = importFromLink;
+    $("#importUrl").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); importFromLink(); } });
     $("#addForm").company.addEventListener("input", () => { clearTimeout(dupeT); dupeT = setTimeout(checkDupes, 300); });
     $("#addForm").job_url.addEventListener("input", () => { clearTimeout(dupeT); dupeT = setTimeout(checkDupes, 300); });
 

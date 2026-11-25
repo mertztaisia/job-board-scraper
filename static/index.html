@@ -221,8 +221,24 @@
         <button type="button" class="btn minimal icon" data-close>✕</button>
       </div>
       <div class="dialog-body">
+        <!-- How to add: read a job link (job boards, any public careers page; AI optional) or type it in -->
+        <div class="seg-pills add-mode" id="addMode" role="tablist">
+          <button type="button" data-mode="link" role="tab">From a link</button>
+          <button type="button" data-mode="manual" role="tab">Enter manually</button>
+        </div>
+        <div class="import-panel" id="importPanel">
+          <label class="field"><span>Job posting link</span>
+            <input id="importUrl" type="url" placeholder="https://company.com/careers/backend-engineer" autocomplete="off"></label>
+          <div class="import-row">
+            <label class="switch" id="importAiWrap"><input type="checkbox" id="importAi"><span class="track"></span>
+              <span>Use AI to read the page<small id="importAiNote"></small></span></label>
+            <button type="button" class="btn primary" id="importBtn">Fill in from link</button>
+          </div>
+          <div class="import-status hidden" id="importStatus"></div>
+        </div>
         <div class="dupe-box hidden" id="dupeBox"></div>
-        <div class="form-grid">
+        <div class="form-grid" id="addFields">
+          <input type="hidden" name="site"><input type="hidden" name="job_type"><input type="hidden" name="date_posted">
           <label class="field span2"><span>Title *</span><input name="title" required></label>
           <label class="field"><span>Company *</span><input name="company" required></label>
           <label class="field"><span>Location</span><input name="location" placeholder="New York, NY"></label>
@@ -236,11 +252,13 @@
           <label class="switch span2"><input type="checkbox" name="is_remote"><span class="track"></span><span>Remote</span></label>
           <label class="field span2"><span>Notes</span><textarea name="notes" rows="2"></textarea></label>
           <label class="field span2"><span>Description</span><textarea name="description" rows="4" placeholder="Paste the job description (optional)"></textarea></label>
+          <label class="switch span2" id="addScreenWrap"><input type="checkbox" name="screen_after"><span class="track"></span>
+            <span>Screen this role with AI after adding (needs a description; about $0.0005)</span></label>
         </div>
       </div>
       <div class="dialog-footer">
         <button type="button" class="btn" data-close>Cancel</button>
-        <button type="submit" class="btn primary">Add role</button>
+        <button type="submit" class="btn primary" id="addSubmit">Add role</button>
       </div>
     </form>
   </div>

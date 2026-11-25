@@ -643,6 +643,20 @@ button.brand[aria-expanded="true"] .caret { transform: rotate(180deg); }
 .menu-check { color: var(--blue4); visibility: hidden; font-size: 13px; }
 .menu.menu-right { left: auto; right: 0; min-width: 300px; }
 
+/* Add role: From a link / Enter manually */
+.add-mode { margin-bottom: 14px; }
+.import-panel { padding: 12px; margin-bottom: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); }
+.import-panel .field { margin-bottom: 8px; }
+.import-row { display: flex; align-items: center; gap: 12px; justify-content: space-between; }
+.import-row .switch { padding: 0; }
+.import-row .switch small { display: block; color: var(--text-3); font-size: 12px; }
+.import-status { margin-top: 10px; font-size: 13px; line-height: 1.5; color: var(--text-2); }
+.import-status.error { color: var(--red5); }
+.import-status ul { margin: 4px 0 0; padding-left: 18px; color: var(--text-3); font-size: 12px; }
+.form-grid .autofilled input, .form-grid .autofilled textarea, .form-grid .autofilled select { border-color: var(--green4, #2e9e6a); }
+.form-grid label.field.autofilled > span::after { content: " · filled in"; color: var(--text-3); font-weight: 400; }
+.btn.working { cursor: progress; opacity: .75; }
+
 /* Role panel: other roles at the same company */
 .same-co { list-style: none; margin: 0; padding: 0; }
 .same-co li { display: flex; align-items: center; gap: 10px; padding: 7px 8px; margin: 0 -8px; border-radius: var(--radius); cursor: pointer; }

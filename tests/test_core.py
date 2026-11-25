@@ -1215,5 +1215,177 @@ class CompanyTests(TempDB):
         self.assertEqual(len(client.get(f"/api/roles/{self.a}").get_json()["same_company"]), 2)
 
 
+JOB_PAGE = """<html><head><title>Backend Engineer | Globex</title>
+<meta property="og:site_name" content="Globex"><meta property="og:title" content="Backend Engineer | Globex">
+<script type="application/ld+json">{"@context": "https://schema.org/", "@type": "JobPosting",
+  "title": "Backend Engineer", "datePosted": "2026-11-20", "employmentType": "FULL_TIME",
+  "hiringOrganization": {"@type": "Organization", "name": "Globex"},
+  "jobLocation": [{"@type": "Place", "address": {"addressCountry": "USA"}},
+                  {"@type": "Place", "address": {"addressLocality": "Austin", "addressRegion": "Texas", "addressCountry": "USA"}}],
+  "baseSalary": {"@type": "MonetaryAmount", "currency": "USD", "value": {"minValue": 70, "maxValue": 90, "unitText": "HOUR"}},
+  "description": "&lt;p&gt;&lt;strong&gt;About us&lt;/strong&gt;&lt;/p&gt;&lt;ul&gt;&lt;li&gt;4+ years of experience building APIs&lt;/li&gt;&lt;/ul&gt;"}
+</script></head><body><main><h1>Backend Engineer</h1><p>Some page text.</p></main></body></html>"""
+
+PLAIN_PAGE = """<html><head><title>Data Engineer - Careers</title></head><body>
+<nav>Home Jobs About</nav><main><h1>Data Engineer</h1>
+<p>We're hiring a data engineer to build our pipelines. You have 3-5 years of experience writing Python.</p>
+<p>Pay: $150,000 - $180,000 a year. """ + "Plenty more about the role and the team. " * 50 + """</p></main>
+<footer>Cookie settings</footer></body></html>"""
+
+SPA_SHELL = "<html><head><title>Loading</title></head><body><div id='root'></div><script>app()</script></body></html>"
+
+
+class JobImportTests(TempDB):
+    """Add role → From a link (no network: pages, the browser and the AI are faked)."""
+
+    def run_import(self, pages, use_ai=False, ai=None, render=None, url="https://jobs.example.com/1"):
+        import job_import
+        fetched = []
+
+        def fetch(u):
+            fetched.append(u)
+            page = pages.get(u, pages.get("*"))
+            if isinstance(page, Exception):
+                raise page
+            return u, page
+        return job_import.import_from_url(url, use_ai=use_ai, fetch=fetch, ai=ai,
+                                          render=render or (lambda u: None)), fetched
+
+    def test_job_posting_data(self):
+        r, _ = self.run_import({"*": JOB_PAGE})
+        f = r["fields"]
+        self.assertEqual((f["title"], f["company"], f["location"]), ("Backend Engineer", "Globex", "Austin, TX (+1 more)"))
+        self.assertEqual((f["pay_min"], f["pay_max"]), (70 * 2080, 90 * 2080))     # hourly -> yearly
+        self.assertEqual((f["job_type"], f["date_posted"], f["years_min"]), ("fulltime", "2026-11-20", 4))
+        self.assertIn("**About us**", f["description"])                           # escaped HTML -> Markdown
+        self.assertEqual((f["site"], r["sources"]["title"], r["board"]), ("manual", "structured", None))
+
+    def test_plain_page_text(self):
+        r, _ = self.run_import({"*": PLAIN_PAGE})
+        f = r["fields"]
+        self.assertEqual(f["title"], "Data Engineer")                              # the page heading
+        self.assertEqual((f["pay_min"], f["pay_max"], f["years_min"], f["years_max"]), (150000, 180000, 3, 5))
+        self.assertNotIn("Cookie settings", f["description"])
+        self.assertNotIn("company", f)                                             # never guessed from the tab title
+
+    def test_javascript_page_is_rendered_in_a_browser(self):
+        rendered = []
+        r, _ = self.run_import({"*": SPA_SHELL}, render=lambda u: rendered.append(u) or JOB_PAGE)
+        self.assertEqual(rendered, ["https://jobs.example.com/1"])
+        self.assertEqual(r["fields"]["company"], "Globex")
+        self.assertTrue(any("headless browser" in m for m in r["messages"]))
+
+    def test_refused_page_tries_the_browser_but_not_for_404(self):
+        import job_import
+        r, _ = self.run_import({"*": job_import.ImportProblem("refused", retry=True)}, render=lambda u: JOB_PAGE)
+        self.assertEqual(r["fields"]["title"], "Backend Engineer")
+        calls = []
+        with self.assertRaises(job_import.ImportProblem) as cm:
+            self.run_import({"*": job_import.ImportProblem("The page wasn't found (HTTP 404).")},
+                            render=lambda u: calls.append(u) or JOB_PAGE)
+        self.assertIn("404", str(cm.exception))
+        self.assertEqual(calls, [])
+
+    def test_sign_in_page_is_reported(self):
+        import job_import
+        page = "<html><head><title>Sign in</title></head><body><main><h1>Sign in to continue</h1>" \
+               "<form><input type='password'></form></main></body></html>"
+        with self.assertRaises(job_import.ImportProblem) as cm:
+            self.run_import({"*": page})
+        self.assertIn("sign in", str(cm.exception).lower())
+
+    def test_ai_fills_gaps_and_keeps_structured_values(self):
+        import job_import
+        seen = {}
+
+        def fake_ai(url, title, text, found, have_description=False):
+            seen.update(found=found, have_description=have_description)
+            return ({"title": "Wrong Title", "company": "Globex Inc", "is_remote": True, "pay_min": 1},
+                    {"model": "claude-haiku-5-5", "input_tokens": 100, "output_tokens": 50, "cost": 0.0001})
+        orig = job_import._ai_available
+        job_import._ai_available = lambda: (True, None)
+        try:
+            r, _ = self.run_import({"*": JOB_PAGE}, use_ai=True, ai=fake_ai)
+        finally:
+            job_import._ai_available = orig
+        f = r["fields"]
+        self.assertEqual((f["title"], f["company"], f["pay_min"]), ("Backend Engineer", "Globex", 70 * 2080))  # structured kept
+        self.assertEqual((f["is_remote"], r["sources"]["is_remote"]), (True, "ai"))                          # gap filled
+        self.assertTrue(seen["have_description"])
+        run = self.conn.execute("SELECT kind, status, ai_cost FROM scrape_runs").fetchone()
+        self.assertEqual(tuple(run), ("import", "ok", 0.0001))                                               # spend recorded
+
+    def test_ai_replaces_weak_page_values(self):
+        import job_import
+        orig = job_import._ai_available
+        job_import._ai_available = lambda: (True, None)
+        try:
+            r, _ = self.run_import({"*": PLAIN_PAGE}, use_ai=True,
+                                   ai=lambda *a, **k: ({"title": "Senior Data Engineer", "company": "Initech"},
+                                                       {"model": "m", "input_tokens": 1, "output_tokens": 1, "cost": 0}))
+        finally:
+            job_import._ai_available = orig
+        self.assertEqual((r["fields"]["title"], r["fields"]["company"]), ("Senior Data Engineer", "Initech"))
+
+    def test_ai_unavailable_is_explained(self):
+        import job_import
+        orig = job_import._ai_available
+        job_import._ai_available = lambda: (False, "No ANTHROPIC_API_KEY")
+        try:
+            r, _ = self.run_import({"*": JOB_PAGE}, use_ai=True, ai=lambda *a, **k: self.fail("AI called"))
+        finally:
+            job_import._ai_available = orig
+        self.assertIn("No ANTHROPIC_API_KEY", r["messages"])
+
+    def test_only_public_web_links(self):
+        import job_import
+        for bad in ("http://127.0.0.1:5055/api/meta", "http://localhost/", "http://192.168.1.10/job", "http://[::1]/",
+                    "file:///C:/Windows/win.ini", "ftp://example.com/x", "https://user:pw@example.com/job", ""):
+            with self.assertRaises(job_import.ImportProblem, msg=bad):
+                job_import.fetch_page(job_import.normalize_url(bad))
+        self.assertEqual(job_import.normalize_url(" jobs.example.com/1 "), "https://jobs.example.com/1")
+
+    def test_linkedin_page(self):
+        page = """<html><body><h1 class="top-card-layout__title">Platform Engineer</h1>
+          <a class="topcard__org-name-link">Initech</a><span class="topcard__flavor--bullet">Remote</span>
+          <div class="show-more-less-html__markup"><p>Build things. 2+ years of experience.</p></div>
+          <li class="description__job-criteria-item"><h3>Employment type</h3><span>Full-time</span></li>
+          <div class="compensation__salary">$120,000.00/yr - $140,000.00/yr</div></body></html>"""
+        r, fetched = self.run_import({"*": page}, url="https://www.linkedin.com/jobs/search/?currentJobId=4123456789&k=x")
+        f = r["fields"]
+        self.assertEqual(fetched, ["https://www.linkedin.com/jobs/view/4123456789"])
+        self.assertEqual((f["title"], f["company"], f["site"], f["is_remote"], f["job_type"]),
+                         ("Platform Engineer", "Initech", "linkedin", True, "fulltime"))
+        self.assertEqual((f["pay_min"], f["pay_max"], f["years_min"]), (120000, 140000, 2))
+
+    def test_board_detection(self):
+        import job_import
+        self.assertEqual(job_import.board_of("https://www.indeed.com/viewjob?jk=7d53cae1fc6f3c7a"), "indeed")
+        self.assertEqual(job_import.board_of("https://www.glassdoor.co.uk/job-listing/x"), "glassdoor")
+        self.assertIsNone(job_import.board_of("https://notindeed.com/x"))
+        self.assertEqual(job_import.indeed_job_key("https://www.indeed.com/viewjob?jk=7d53cae1fc6f3c7a&from=x"), "7d53cae1fc6f3c7a")
+        self.assertEqual(daily_jobs.linkedin_job_id("https://www.linkedin.com/jobs/collections/x/?currentJobId=4123456789"),
+                         "4123456789")
+
+    def test_api(self):
+        import app
+        import job_import
+        client = app.app.test_client()
+        orig = job_import.import_from_url
+        job_import.import_from_url = lambda url, use_ai=False: (_ for _ in ()).throw(job_import.ImportProblem("refused"))
+        try:
+            r = client.post("/api/import", json={"url": "https://x.example/1"})
+            self.assertEqual((r.status_code, r.get_json()["error"]), (422, "refused"))
+        finally:
+            job_import.import_from_url = orig
+        self.assertEqual(client.post("/api/import", json={}).status_code, 400)
+        # the filled-in form saves job type, date and site too
+        r = client.post("/api/roles", json={"title": "Backend Engineer", "company": "Globex", "site": "linkedin",
+                                           "job_type": "fulltime", "date_posted": "2026-11-20", "status": "not_applied"})
+        role = r.get_json()
+        self.assertEqual((r.status_code, role["site"], role["job_type"], role["date_posted"]),
+                         (201, "linkedin", "fulltime", "2026-11-20"))
+
+
 if __name__ == "__main__":
     unittest.main()

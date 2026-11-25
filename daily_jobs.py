@@ -174,8 +174,11 @@ def _zip_fetcher():
 
 
 def linkedin_job_id(url) -> str | None:
-    """'https://www.linkedin.com/jobs/view/4123456789' (or '.../view/some-title-4123456789/') -> '4123456789'."""
-    m = re.search(r"linkedin\.com/jobs/view/(?:[\w%-]*-)?(\d{5,})", str(url or ""))
+    """'https://www.linkedin.com/jobs/view/4123456789' (or '.../view/some-title-4123456789/',
+    or a search page link with '?currentJobId=4123456789') -> '4123456789'."""
+    url = str(url or "")
+    m = (re.search(r"linkedin\.com/jobs/view/(?:[\w%-]*-)?(\d{5,})", url)
+         or re.search(r"linkedin\.com/.*[?&]currentJobId=(\d{5,})", url))
     return m.group(1) if m else None
 
 
