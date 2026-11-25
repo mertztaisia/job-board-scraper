@@ -134,7 +134,10 @@
         <label class="switch" title="Archived roles are hidden everywhere (including search) unless this is on"><input type="checkbox" id="fArchived"><span class="track"></span><span>Include archived <span class="count-inline" id="archivedCount"></span></span></label>
       </details>
 
-      <button class="btn minimal small clear" id="clearFilters">Reset filters</button>
+      <!-- Stays in view at the bottom of the sidebar while the filters scroll -->
+      <div class="sidebar-sticky">
+        <button class="btn minimal small clear" id="clearFilters">Reset filters</button>
+      </div>
 
       <div class="sidebar-foot">
         <div class="legend"><span class="fresh-swatch"></span>Posted today or yesterday, not applied</div>
