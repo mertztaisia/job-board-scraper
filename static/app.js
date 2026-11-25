@@ -2293,6 +2293,9 @@
     META = await api("/api/meta");
     STATUSES = META.statuses;
     $("#dbPath").textContent = META.db_path;
+    // The running version ("local" = this folder's code with unreleased changes; see CHANGELOG.md).
+    if (META.version) $("#appVersion").textContent = META.launched_as === "local"
+      ? `Version ${META.version} + local changes` : `Version ${META.launched_as || META.version}`;
     RESUMES = (await api("/api/resumes")).files;
     wire();
     await applyRoute();

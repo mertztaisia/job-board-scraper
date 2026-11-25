@@ -1453,5 +1453,234 @@ class JobImportTests(TempDB):
                          (201, "linkedin", "fulltime", "2026-11-20"))
 
 
+class VersionTests(TempDB):
+    """Versions: comparing them, the database only moving forward, launch.py and release.py."""
+
+    def test_version_numbers(self):
+        import versions
+        self.assertEqual(versions.parse("v1.6.0"), (1, 6, 0))
+        self.assertIsNone(versions.parse("1.6"))
+        self.assertTrue(versions.newer("1.10.0", "1.9.9"))                   # numbers, not text
+        self.assertFalse(versions.newer("1.8.0", "1.8.0"))
+        self.assertEqual(versions.newest_first(["v1.2.0", "v1.10.0", "v1.4.1", "junk", "v1.2.0"]),
+                         ["1.10.0", "1.4.1", "1.2.0"])
+
+    def reopen(self):
+        self.conn.close()
+        db._initialized.clear()
+        self.conn = db.connect()
+
+    def set_last_version(self, v):
+        self.conn.execute("UPDATE settings SET value=? WHERE key='app_version'", (v,))
+        self.conn.commit()
+
+    def test_new_database_records_its_version_without_a_backup(self):
+        self.assertEqual(db._last_app_version(self.conn), settings.VERSION)
+        self.assertFalse(list(settings.BACKUP_DIR.glob("*before-*")) if settings.BACKUP_DIR.exists() else [])
+
+    def test_upgrade_saves_a_backup_first(self):
+        db.upsert_role(self.conn, job())
+        self.set_last_version("1.7.0")
+        self.reopen()
+        self.assertEqual(db._last_app_version(self.conn), settings.VERSION)
+        backups = list(settings.BACKUP_DIR.glob(f"*-before-{settings.VERSION}.db"))
+        self.assertEqual(len(backups), 1)
+        import sqlite3
+        old = sqlite3.connect(backups[0])
+        self.assertEqual(old.execute("SELECT value FROM settings WHERE key='app_version'").fetchone()[0], "1.7.0")
+        old.close()
+        self.reopen()                                                          # same version again: no new backup
+        self.assertEqual(len(list(settings.BACKUP_DIR.glob("*-before-*.db"))), 1)
+
+    def test_older_app_on_the_same_schema_is_fine(self):
+        self.set_last_version("9.0.0")                                         # a newer app used it, same schema
+        self.reopen()
+        self.assertEqual(db._last_app_version(self.conn), "9.0.0")             # still the newest one recorded
+        self.assertFalse(list(settings.BACKUP_DIR.glob("*-before-*.db")) if settings.BACKUP_DIR.exists() else [])
+
+    def test_a_newer_schema_is_refused_and_left_alone(self):
+        rid, _ = db.upsert_role(self.conn, job())
+        self.conn.execute(f"PRAGMA user_version={db.SCHEMA_VERSION + 1}")
+        self.conn.commit()
+        self.conn.close()
+        db._initialized.clear()
+        with self.assertRaises(db.DatabaseTooNew) as cm:
+            db.connect()
+        self.assertIn(f"schema version {db.SCHEMA_VERSION + 1}", str(cm.exception))
+        db._initialized.clear()
+        raw = db._open(db.DB_PATH)                                             # untouched
+        self.assertEqual(raw.execute("PRAGMA user_version").fetchone()[0], db.SCHEMA_VERSION + 1)
+        self.assertEqual(raw.execute("SELECT COUNT(*) FROM roles").fetchone()[0], 1)
+        self.conn = raw                                                        # for tearDown
+
+    def with_migrations(self, migrations):
+        """Run the test with these extra numbered migrations (and SCHEMA_VERSION raised to match)."""
+        saved = (dict(db.MIGRATIONS), db.SCHEMA_VERSION)
+        db.MIGRATIONS.update(migrations)
+        db.SCHEMA_VERSION = max(db.MIGRATIONS)
+        self.addCleanup(lambda: (db.MIGRATIONS.clear(), db.MIGRATIONS.update(saved[0]),
+                                 setattr(db, "SCHEMA_VERSION", saved[1])))
+
+    def test_migrations_run_once_in_order_after_a_backup(self):
+        rid, _ = db.upsert_role(self.conn, job())
+        self.conn.commit()
+        ran = []
+        base = db.SCHEMA_VERSION
+
+        def add_tags(conn):
+            ran.append("tags")
+            conn.execute("ALTER TABLE roles ADD COLUMN tags TEXT")
+            conn.execute("UPDATE roles SET tags='[]'")
+
+        def add_index(conn):
+            ran.append("index")
+            conn.execute("CREATE INDEX idx_roles_tags ON roles(tags)")
+        self.with_migrations({base + 1: ("add tags to roles", add_tags), base + 2: ("index tags", add_index)})
+        self.reopen()
+        self.assertEqual(ran, ["tags", "index"])
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], base + 2)
+        self.assertEqual(self.conn.execute("SELECT tags FROM roles WHERE id=?", (rid,)).fetchone()[0], "[]")
+        self.assertEqual([h["name"] for h in db.schema_history(self.conn)], ["add tags to roles", "index tags"])
+        self.assertEqual(len(list(settings.BACKUP_DIR.glob("*-before-*.db"))), 1)   # one backup before upgrading
+        self.reopen()
+        self.assertEqual(ran, ["tags", "index"])                               # never run twice
+
+    def test_a_new_database_takes_the_same_path(self):
+        base = db.SCHEMA_VERSION
+        self.with_migrations({base + 1: ("add tags to roles", lambda c: c.execute("ALTER TABLE roles ADD COLUMN tags TEXT"))})
+        self.conn.close()
+        Path(db.DB_PATH).unlink()
+        db._initialized.clear()
+        self.conn = db.connect()                                               # a brand-new database
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(roles)")}
+        self.assertIn("tags", cols)
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], base + 1)
+        self.assertFalse(list(settings.BACKUP_DIR.glob("*-before-*.db")) if settings.BACKUP_DIR.exists() else [])
+
+    def test_a_failed_migration_changes_nothing(self):
+        rid, _ = db.upsert_role(self.conn, job())
+        self.conn.commit()
+        base = db.SCHEMA_VERSION
+
+        def half_done(conn):
+            conn.execute("ALTER TABLE roles ADD COLUMN broken TEXT")
+            conn.execute("UPDATE roles SET title='changed'")
+            raise RuntimeError("oops")
+        self.with_migrations({base + 1: ("good", lambda c: c.execute("ALTER TABLE roles ADD COLUMN good TEXT")),
+                              base + 2: ("bad", half_done)})
+        self.conn.close()
+        db._initialized.clear()
+        with self.assertRaises(db.MigrationFailed) as cm:
+            db.connect()
+        self.assertIn(f"unchanged at schema version {base + 1}", str(cm.exception))
+        db._initialized.clear()
+        raw = db._open(db.DB_PATH)
+        self.assertEqual(raw.execute("PRAGMA user_version").fetchone()[0], base + 1)   # the good one stays
+        cols = {r["name"] for r in raw.execute("PRAGMA table_info(roles)")}
+        self.assertIn("good", cols)
+        self.assertNotIn("broken", cols)
+        self.assertEqual(raw.execute("SELECT title FROM roles WHERE id=?", (rid,)).fetchone()[0], "Software Engineer")
+        self.conn = raw
+
+    def test_status_rebuild_keeps_what_migrations_added(self):
+        rid, _ = db.upsert_role(self.conn, job())
+        self.conn.commit()
+        base = db.SCHEMA_VERSION
+
+        def add_tags(conn):
+            conn.execute("ALTER TABLE roles ADD COLUMN tags TEXT")
+            conn.execute("CREATE INDEX idx_roles_tags ON roles(tags)")
+            conn.execute("UPDATE roles SET tags='x'")
+        self.with_migrations({base + 1: ("tags", add_tags)})
+        self.reopen()
+        saved = dict(db.STATUSES)
+        db.STATUSES["ghosted"] = "Ghosted"                                      # the status list changes in code
+        try:
+            self.reopen()
+            self.assertEqual(self.conn.execute("SELECT tags FROM roles WHERE id=?", (rid,)).fetchone()[0], "x")
+            idx = {r[0] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='roles'")}
+            self.assertTrue({"idx_roles_tags", "idx_roles_status"} <= idx)
+            db.update_role(self.conn, rid, {"status": "ghosted"})              # the new CHECK allows it
+        finally:
+            db.STATUSES.clear()
+            db.STATUSES.update(saved)
+
+    def test_db_status_command(self):
+        import io
+        import contextlib
+        import types
+        import jobs
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = jobs.db_status(types.SimpleNamespace(check=True, backup=False))
+        self.assertEqual(code, 0)
+        self.assertIn(f"version {db.SCHEMA_VERSION} (up to date)", out.getvalue())
+        self.assertIn("Check:         ok", out.getvalue())
+
+    def test_launcher_picks_the_version(self):
+        import launch
+        saved = (launch.releases, launch.checked_out_release, launch.unpack)
+        launch.releases = lambda: ["1.7.0", "1.6.0", "1.0.0"]
+        launch.checked_out_release = lambda: "1.7.0"
+        launch.unpack = lambda v: Path("versions") / v
+        try:
+            self.assertEqual(launch.resolve(None), ("1.7.0", launch.HERE))    # latest = checked out here
+            self.assertEqual(launch.resolve("latest"), ("1.7.0", launch.HERE))
+            self.assertEqual(launch.resolve("v1.6.0"), ("1.6.0", Path("versions") / "1.6.0"))
+            self.assertEqual(launch.resolve("local"), ("local", launch.HERE))
+            for bad in ("1.5.0", "banana"):
+                with self.assertRaises(launch.LaunchError):
+                    launch.resolve(bad)
+            launch.checked_out_release = lambda: None                          # local changes: latest is unpacked
+            self.assertEqual(launch.resolve(None), ("1.7.0", Path("versions") / "1.7.0"))
+            launch.releases = lambda: []
+            self.assertEqual(launch.resolve(None), ("local", launch.HERE))      # no releases yet
+        finally:
+            launch.releases, launch.checked_out_release, launch.unpack = saved
+
+    def test_launcher_guards_the_database_and_passes_settings(self):
+        import launch
+        saved = (launch.settings.DB_PATH, launch.release_schema)
+        launch.settings.DB_PATH = db.DB_PATH
+        launch.release_schema = lambda v: {"1.0.0": 2, "9.0.0": 5}.get(v)
+        try:
+            self.assertEqual(launch.database_info()["schema"], db.SCHEMA_VERSION)
+            launch.check_database("1.0.0")                                     # same schema: an older release is fine
+            launch.check_database("local")
+            self.conn.execute("PRAGMA user_version=3")                         # the database moved on
+            self.conn.commit()
+            with self.assertRaises(launch.LaunchError) as cm:
+                launch.check_database("1.0.0")                                 # release 1.0.0 doesn't know schema 3
+            self.assertIn("only knows up to 2", str(cm.exception))
+            launch.check_database("9.0.0")                                     # a release that knows it: fine
+            self.conn.execute(f"PRAGMA user_version={db.SCHEMA_VERSION}")
+            self.conn.commit()
+            env = launch.child_env("1.6.0")
+            self.assertEqual((env["JOBS_DB"], env["JOBS_LAUNCHED_AS"]), (str(Path(db.DB_PATH).resolve()), "1.6.0"))
+            self.assertTrue(Path(env["JOBS_RESUME_DIR"]).is_absolute())
+        finally:
+            launch.settings.DB_PATH, launch.release_schema = saved
+
+    def test_each_release_says_which_schema_it_uses(self):
+        import launch
+        try:
+            rel = launch.releases()
+        except launch.LaunchError:
+            self.skipTest("git isn't available")
+        if "1.0.0" not in rel:
+            self.skipTest("this clone has no release tags")
+        self.assertEqual(launch.release_schema("1.0.0"), 2)                     # the 1.x baseline
+
+    def test_release_moves_the_unreleased_notes(self):
+        import release
+        text = "# Changelog\n\n## [Unreleased]\n### Added\n- A thing\n\n## [1.8.0] - 2026-11-25\n- Old\n"
+        out = release.release_changelog(text, "1.9.0", "2026-12-01")
+        self.assertIn("## [Unreleased]\n\n## [1.9.0] - 2026-12-01\n### Added\n- A thing\n\n## [1.8.0]", out)
+        with self.assertRaises(ValueError):
+            release.release_changelog("# Changelog\n\n## [Unreleased]\n\n## [1.8.0] - x\n", "1.9.0", "d")
+        changelog = (Path(release.__file__).parent / "CHANGELOG.md").read_text(encoding="utf-8")
+        self.assertIn(f"## [{settings.VERSION}] - ", changelog)                # the code's version is documented
+
+
 if __name__ == "__main__":
     unittest.main()

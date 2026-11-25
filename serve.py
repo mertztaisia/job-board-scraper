@@ -79,13 +79,17 @@ def main():
     from waitress import serve
     from app import app
     import db
-    log.info("Job Tracker %s on http://%s:%s  (db: %s)", settings.VERSION, settings.HOST,
+    log.info("Job Tracker %s on http://%s:%s  (db: %s)", settings.LAUNCHED_AS, settings.HOST,
              settings.PORT, settings.DB_PATH)
     if db.in_synced_folder(settings.DB_PATH):
         log.warning("The database is in a cloud-synced folder (%s). Syncing a live SQLite file "
                     "can corrupt it; set JOBS_DB in .env to a local folder (see README).",
                     settings.DB_PATH.parent)
-    db.connect().close()   # run any schema upgrade now, before serving requests
+    try:
+        db.connect().close()   # run any schema upgrade now, before serving requests
+    except db.DatabaseError as e:     # too new for this version, or a migration failed
+        log.error("%s", e)
+        sys.exit(2)
     db.mark_stale_runs()   # runs left 'running' by a previous crash or restart
     threading.Thread(target=backup_loop, args=(log,), daemon=True, name="daily-backup").start()
     serve(app, host=settings.HOST, port=settings.PORT, threads=settings.THREADS,

@@ -107,7 +107,7 @@ def health():
         ok = True
     except Exception as e:  # report, don't crash
         roles_n, ok = str(e), False
-    return jsonify(ok=ok, version=settings.VERSION, started_at=STARTED_AT,
+    return jsonify(ok=ok, version=settings.VERSION, launched_as=settings.LAUNCHED_AS, started_at=STARTED_AT,
                    db=str(db.DB_PATH), roles=roles_n), (200 if ok else 500)
 
 
@@ -128,6 +128,7 @@ def meta():
     with conn() as c:
         prefs = db.get_prefs(c)
     return jsonify(statuses=db.STATUSES, base_dir=str(db.BASE_DIR), db_path=str(db.DB_PATH),
+                   version=settings.VERSION, launched_as=settings.LAUNCHED_AS,
                    interests=prefs.get("interests", []), ai=ai_screen.key_status(),
                    ai_enabled=prefs["ai"].get("enabled", True), model=prefs["ai"].get("model"),
                    round_kinds=db.ROUND_KINDS, round_statuses=db.ROUND_STATUSES,
@@ -635,6 +636,10 @@ if __name__ == "__main__":
     args = ap.parse_args()
     if args.db:
         db.DB_PATH = Path(args.db)
+    try:
+        db.connect().close()   # check (and upgrade) the database before serving
+    except db.DatabaseError as e:
+        raise SystemExit(str(e))
     if not args.no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(f"http://localhost:{args.port}")).start()
     app.run(host="127.0.0.1", port=args.port, debug=False, threaded=True)

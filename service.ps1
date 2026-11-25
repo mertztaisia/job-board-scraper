@@ -8,19 +8,31 @@
     powershell -ExecutionPolicy Bypass -File service.ps1 restart    # after updating code
     powershell -ExecutionPolicy Bypass -File service.ps1 status
     powershell -ExecutionPolicy Bypass -File service.ps1 logs
+    powershell -ExecutionPolicy Bypass -File service.ps1 versions   # list the releases
     powershell -ExecutionPolicy Bypass -File service.ps1 uninstall  # remove auto-start + stop
 
-  The service runs serve.py with pythonw.exe (no window) as your Windows user,
-  starts when you log in, and restarts itself if it crashes.
+  Pick a version with -Version (install, start and restart; remembered by the auto-start task):
+    ... service.ps1 install -Version latest   # the newest release (the default)
+    ... service.ps1 restart -Version 1.6.0    # a specific release
+    ... service.ps1 restart -Version local    # the code in this folder, unreleased changes included
+
+  The service runs launch.py (which starts serve.py at that version) with pythonw.exe (no
+  window) as your Windows user, starts when you log in, and restarts itself if it crashes.
 #>
-param([Parameter(Position = 0)][ValidateSet("install", "uninstall", "start", "stop", "restart", "status", "logs")][string]$Action = "status")
+param(
+    [Parameter(Position = 0)][ValidateSet("install", "uninstall", "start", "stop", "restart", "status", "logs", "versions")][string]$Action = "status",
+    [ValidatePattern('^(latest|local|v?\d+\.\d+\.\d+)$')][string]$Version = "latest"
+)
 
 $ErrorActionPreference = "Stop"
 $Here     = Split-Path -Parent $MyInvocation.MyCommand.Path
 $TaskName = "Job Tracker"
 $PyW      = Join-Path $Here ".venv\Scripts\pythonw.exe"
-$Serve    = Join-Path $Here "serve.py"
-$LogFile  = Join-Path $Here "logs\server.log"
+$Py       = Join-Path $Here ".venv\Scripts\python.exe"
+$Launch   = Join-Path $Here "launch.py"
+$LogDir   = Join-Path $Here "logs"
+$VersionGiven = $PSBoundParameters.ContainsKey("Version")
+$VersionsDir = if ($env:JOBS_VERSIONS_DIR) { $env:JOBS_VERSIONS_DIR } else { Join-Path $env:LOCALAPPDATA "JobTracker\versions" }
 
 function Get-Port {
     $port = 5055
@@ -46,35 +58,58 @@ function Test-Health {
     try { Invoke-RestMethod -Uri "$Url/api/health" -TimeoutSec 3 } catch { $null }
 }
 
+function New-TrackerAction([string]$v) {
+    New-ScheduledTaskAction -Execute $PyW -Argument "`"$Launch`" --version $v" -WorkingDirectory $Here
+}
+
+# The version the auto-start task runs; $null for a task installed before versions existed
+# (it runs serve.py directly). start/restart switch such a task to launch.py.
+function Get-TaskVersion($task) {
+    $arg = ($task.Actions | Select-Object -First 1).Arguments
+    if ($arg -match '--version\s+(\S+)') { return $Matches[1] }
+    return $null
+}
+
 function Start-Tracker {
     $existing = @(Get-ServerPids)
     if ($existing) {
-        if (@($existing | Where-Object { Test-IsTracker $_ })) { Write-Host "Already running on $Url" }
+        if (@($existing | Where-Object { Test-IsTracker $_ })) { Write-Host "Already running on $Url (stop or restart it to change the version)" }
         else { Write-Warning "Port $Port is used by another program, so the tracker can't start. Set JOBS_PORT in .env to a free port." }
         return
     }
     if (-not (Test-Path $PyW)) { throw "Missing $PyW. Create the virtual env first (see README)." }
-    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+    $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($task) {
+        # -Version changes the version the auto-start task runs (from now on, at login too).
+        if ($VersionGiven -or -not (Get-TaskVersion $task)) {
+            Set-ScheduledTask -TaskName $TaskName -Action (New-TrackerAction $Version) | Out-Null
+            Write-Host "Auto-start now runs version: $Version"
+        }
         Start-ScheduledTask -TaskName $TaskName
     } else {
-        Start-Process -FilePath $PyW -ArgumentList "`"$Serve`"" -WorkingDirectory $Here -WindowStyle Hidden
+        Start-Process -FilePath $PyW -ArgumentList "`"$Launch`" --version $Version" -WorkingDirectory $Here -WindowStyle Hidden
     }
-    for ($i = 0; $i -lt 20; $i++) {
+    # The first start of an older release unpacks it, so allow a little longer.
+    for ($i = 0; $i -lt 40; $i++) {
         Start-Sleep -Milliseconds 500
         $h = Test-Health
-        if ($h) { Write-Host "Running: $Url  ($($h.roles) roles, db $($h.db))"; return }
+        if ($h) {
+            $v = if ($h.launched_as) { $h.launched_as } else { $h.version }
+            Write-Host "Running: $Url  (version $v, $($h.roles) roles, db $($h.db))"; return
+        }
     }
     Write-Warning "Started, but $Url/api/health isn't answering yet. Check: service.ps1 logs"
 }
 
-# True if the process is this tracker: its command line runs serve.py or app.py from
-# this folder. (In a venv the listening process is the base Python, so the exe path
-# alone can't tell.)
+# True if the process is this tracker: its command line runs serve.py, app.py or launch.py
+# from this folder, or a release unpacked by launch.py. (In a venv the listening process
+# is the base Python, so the exe path alone can't tell.)
 function Test-IsTracker([int]$ProcessId) {
     $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue
     if (-not $proc -or -not $proc.CommandLine) { return $false }
-    foreach ($script in @("serve.py", "app.py")) {
-        if ($proc.CommandLine.IndexOf((Join-Path $Here $script), [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
+    $paths = @("serve.py", "app.py", "launch.py" | ForEach-Object { Join-Path $Here $_ }) + @($VersionsDir)
+    foreach ($p in $paths) {
+        if ($proc.CommandLine.IndexOf($p, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
     }
     return $false
 }
@@ -99,15 +134,16 @@ switch ($Action) {
     "install" {
         # Not "$action": PowerShell names are case-insensitive, so it would clash with the
         # $Action parameter (and its ValidateSet) and the install would fail.
-        $taskAction = New-ScheduledTaskAction -Execute $PyW -Argument "`"$Serve`"" -WorkingDirectory $Here
+        $taskAction = New-TrackerAction $Version
         $trigger  = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
         $settingsObj = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
             -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) `
             -MultipleInstances IgnoreNew -StartWhenAvailable
         $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
         Register-ScheduledTask -TaskName $TaskName -Action $taskAction -Trigger $trigger -Settings $settingsObj `
-            -Principal $principal -Description "Job Tracker web app on $Url (job_search/serve.py)" -Force | Out-Null
-        Write-Host "Installed: '$TaskName' starts automatically when you log in."
+            -Principal $principal -Description "Job Tracker web app on $Url (job_search/launch.py)" -Force | Out-Null
+        Write-Host "Installed: '$TaskName' starts automatically when you log in (version: $Version)."
+        $script:VersionGiven = $false   # the task was just set up with it
         Start-Tracker
     }
     "uninstall" {
@@ -122,13 +158,21 @@ switch ($Action) {
     "restart" { Stop-Tracker; Start-Sleep -Seconds 1; Start-Tracker }
     "status" {
         $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-        Write-Host ("Auto-start: " + $(if ($task) { "installed ($($task.State))" } else { "not installed" }))
+        Write-Host ("Auto-start: " + $(if ($task) { "installed ($($task.State)), version: $(if (Get-TaskVersion $task) { Get-TaskVersion $task } else { 'local, set up before versions (start or restart switches it to latest)' })" } else { "not installed" }))
         $h = Test-Health
-        if ($h) { Write-Host "Server:     running at $Url  (v$($h.version), up since $($h.started_at), $($h.roles) roles)" }
+        if ($h) {
+            $v = if ($h.launched_as) { $h.launched_as } else { $h.version }
+            Write-Host "Server:     running at $Url  (version $v, up since $($h.started_at), $($h.roles) roles)"
+        }
         elseif (Get-ServerPids) { Write-Host "Server:     port $Port is in use but /api/health didn't answer" }
         else { Write-Host "Server:     not running" }
     }
     "logs" {
-        if (Test-Path $LogFile) { Get-Content $LogFile -Tail 60 } else { Write-Host "No log yet ($LogFile)." }
+        foreach ($f in @("launch.log", "server.log")) {
+            $path = Join-Path $LogDir $f
+            if (Test-Path $path) { Write-Host "== $path"; Get-Content $path -Tail 40 }
+        }
+        if (-not (Test-Path (Join-Path $LogDir "server.log"))) { Write-Host "No server log yet ($LogDir)." }
     }
+    "versions" { & $Py $Launch --list }
 }

@@ -12,6 +12,9 @@ Runtime configuration, read from environment variables or job_search/.env.
                       which is outside OneDrive)
   JOBS_ALLOWED_HOSTS  extra host names the web server answers to, comma-separated
                       (only needed if you open it from another device)
+  JOBS_LOG_DIR        folder for the server log (default job_search/logs)
+  JOBS_VERSIONS_DIR   where launch.py unpacks older releases to run them
+                      (default %LOCALAPPDATA%/JobTracker/versions)
 """
 
 from __future__ import annotations
@@ -46,7 +49,9 @@ DB_PATH = Path(os.environ.get("JOBS_DB") or HERE / "jobs.db")
 # Only this folder (and its subfolders) is offered in the resume picker and served by
 # /api/file, so keep it to your resumes rather than a whole home folder.
 RESUME_DIR = (HERE / (os.environ.get("JOBS_RESUME_DIR") or "resumes")).resolve()
-LOG_DIR = HERE / "logs"
+LOG_DIR = Path(os.environ.get("JOBS_LOG_DIR") or HERE / "logs")
+VERSIONS_DIR = Path(os.environ.get("JOBS_VERSIONS_DIR")
+                    or Path(os.environ.get("LOCALAPPDATA") or HERE) / "JobTracker" / "versions")
 BACKUP_DIR = Path(os.environ.get("JOBS_BACKUP_DIR")
                   or Path(os.environ.get("LOCALAPPDATA") or HERE) / "JobTracker" / "backups")
 BACKUP_KEEP = 14  # daily backups to keep
@@ -57,4 +62,8 @@ ALLOWED_HOSTS = {"localhost", "127.0.0.1", "::1"} | {
     h.strip().lower() for h in os.environ.get("JOBS_ALLOWED_HOSTS", "").split(",") if h.strip()}
 if HOST not in ("0.0.0.0", "::", ""):
     ALLOWED_HOSTS.add(HOST.lower())
-VERSION = "1.0.0"
+# The version of the code in this folder (see CHANGELOG.md; releases are git tags vX.Y.Z,
+# made with release.py). launch.py sets JOBS_LAUNCHED_AS to "local" when you run this folder's
+# code as it is rather than a release.
+VERSION = "1.8.0"
+LAUNCHED_AS = os.environ.get("JOBS_LAUNCHED_AS") or VERSION

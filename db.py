@@ -197,12 +197,38 @@ CREATE INDEX IF NOT EXISTS idx_roles_url       ON roles(job_url);
 CREATE INDEX IF NOT EXISTS idx_roles_url_dir   ON roles(job_url_direct);
 CREATE INDEX IF NOT EXISTS idx_roles_signature ON roles(signature);
 """
-SCHEMA_VERSION = 2   # PRAGMA user_version; 2 = roles without UNIQUE(signature), with CHECK(status)
+# ----------------------------------------------------------------------------
+# Database versions (migrations)
+#
+# The database's schema version is stored in it (PRAGMA user_version). SCHEMA above is
+# version 2, the baseline every release from 1.0.0 to 1.7.0 uses. Each later change to
+# the structure is a numbered migration below, and SCHEMA_VERSION is the newest number.
+# Every database, new or old, is brought to SCHEMA_VERSION the same way: the baseline,
+# then each migration it hasn't had yet, in order, once, each in its own transaction (a
+# failed migration changes nothing). A backup is saved before any upgrade. A database
+# with a newer schema than the code knows is refused (DatabaseTooNew) instead of being
+# touched; to go back to an older version, restore the backup from before the upgrade.
+#
+# To change the schema:
+#   1. add a function, above MIGRATIONS, that makes the change, e.g.
+#          def _m3_role_tags(conn):
+#              conn.execute("ALTER TABLE roles ADD COLUMN tags TEXT")
+#      (use conn.execute only; executescript would commit half way);
+#   2. register it as the next number in MIGRATIONS and raise SCHEMA_VERSION to match;
+#   3. leave SCHEMA as it is (it stays the version-2 baseline) and add a test.
+# launch.py reads SCHEMA_VERSION from each release's db.py, so keep it a plain number.
+# ----------------------------------------------------------------------------
+BASELINE_VERSION = 2
+SCHEMA_VERSION = 2
 
-# Columns added after the first version: (table, column, type).
-# (Older roles columns are now part of the roles table itself; see _rebuild_roles.)
-MIGRATIONS = [
-    ("scrape_runs", "kind", "TEXT"),          # pull / rescreen
+MIGRATIONS: dict = {
+    # 3: ("add tags to roles", _m3_role_tags),
+}
+
+# Columns added during the 1.x baseline (before numbered migrations), kept so databases
+# from before them still get them: (table, column, type).
+BASELINE_COLUMNS = [
+    ("scrape_runs", "kind", "TEXT"),          # pull / rescreen / descriptions / import
     ("scrape_runs", "trigger", "TEXT"),       # ui / cli / schedule
     ("scrape_runs", "ai_screened", "INTEGER"),
     ("scrape_runs", "ai_rejected", "INTEGER"),
@@ -213,7 +239,7 @@ MIGRATIONS = [
     ("status_history", "source", "TEXT"),     # 'ai' = made by the AI screen; NULL = you / a pull
 ]
 # One-time data fixes that run right after a column above is added.
-BACKFILLS = {
+BASELINE_BACKFILLS = {
     # Before this column existed, AI changes were only recognisable by their note.
     ("status_history", "source"): "UPDATE status_history SET source='ai' "
                                   "WHERE note LIKE 'AI screen:%' OR note LIKE 'AI re-screen:%'",
@@ -298,23 +324,113 @@ def connect() -> sqlite3.Connection:
     conn = _open(DB_PATH)
     key = str(Path(DB_PATH).resolve())
     if key not in _initialized:
-        _init_schema(conn)
+        try:
+            _init_schema(conn)
+        except Exception:
+            conn.close()
+            raise
         _initialized.add(key)
     return conn
 
 
+class DatabaseError(RuntimeError):
+    """The database can't be used by this version of the tracker (see the message)."""
+
+
+class DatabaseTooNew(DatabaseError):
+    """The database's schema is newer than this version of the tracker knows."""
+
+
+class MigrationFailed(DatabaseError):
+    """A migration failed; it was rolled back, so the database is unchanged."""
+
+
+def _setting(conn, key) -> str | None:
+    try:
+        row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    except sqlite3.OperationalError:   # no settings table yet
+        return None
+    return row[0] if row else None
+
+
+def _last_app_version(conn) -> str | None:
+    """The newest tracker version that has used this database (recorded since 1.8.0)."""
+    return _setting(conn, "app_version")
+
+
+def schema_history(conn) -> list[dict]:
+    """Migrations applied to this database: [{"version", "name", "at", "app_version"}]."""
+    try:
+        return json.loads(_setting(conn, "schema_history") or "[]")
+    except ValueError:
+        return []
+
+
+def _record(conn, key, value):
+    conn.execute("INSERT INTO settings(key, value) VALUES(?, ?) "
+                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+
 def _init_schema(conn):
-    conn.execute("PRAGMA journal_mode=WAL")
+    """Bring the database to SCHEMA_VERSION (see "Database versions" above)."""
+    import versions
     fresh = conn.execute("SELECT 1 FROM sqlite_master WHERE name='roles'").fetchone() is None
-    conn.executescript(SCHEMA.replace("__STATUSES__", _status_list_sql()))
-    _migrate(conn)
-    version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if not fresh and (version < SCHEMA_VERSION or not _status_check_current(conn)):
-        _rebuild_roles(conn, clean_seen=version < 2)
-    conn.executescript(ROLES_INDEXES)
-    conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+    current = 0 if fresh else conn.execute("PRAGMA user_version").fetchone()[0]
+    last_app = None if fresh else _last_app_version(conn)
+    if current > SCHEMA_VERSION:
+        raise DatabaseTooNew(
+            f"This database ({DB_PATH}) has schema version {current}"
+            + (f" (last used by version {last_app})" if last_app else "")
+            + f", but this version of the tracker ({settings.LAUNCHED_AS}) only knows up to "
+            f"{SCHEMA_VERSION}, so it won't touch it. Start a newer version (the latest release is the "
+            f"default), or to go back, restore the copy saved before the upgrade (in {settings.BACKUP_DIR}) "
+            f"and point JOBS_DB at it.")
+    statuses_changed = not fresh and not _status_check_current(conn)
+    newer_app = not fresh and (last_app is None or versions.newer(settings.VERSION, last_app))
+    if not fresh and (current < SCHEMA_VERSION or statuses_changed or newer_app):
+        path = backup(conn, reason=f"before-{settings.VERSION}")
+        log.info("Upgrading the database (schema %s -> %s, app %s -> %s); backup at %s",
+                 current, SCHEMA_VERSION, last_app or "1.7.0 or earlier", settings.VERSION, path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    if current <= BASELINE_VERSION:
+        # New databases and 1.x databases: the version-2 baseline.
+        conn.executescript(SCHEMA.replace("__STATUSES__", _status_list_sql()))
+        _migrate(conn)
+        if not fresh and current < BASELINE_VERSION:
+            _rebuild_roles(conn, clean_seen=True)          # from before the 1.0.0 baseline
+            statuses_changed = False
+        conn.executescript(ROLES_INDEXES)
+        conn.execute(f"PRAGMA user_version={BASELINE_VERSION}")
+        conn.commit()
+        current = BASELINE_VERSION
+    if statuses_changed:
+        _rebuild_roles(conn)                               # the status list changed in code
+    _apply_migrations(conn, current)
+    if fresh or newer_app:
+        _record(conn, "app_version", settings.VERSION)     # the newest version that has used it
     conn.commit()
     _migrate_seen_json(conn)
+
+
+def _apply_migrations(conn, current: int):
+    """Run migrations current+1 .. SCHEMA_VERSION, each once and in its own transaction."""
+    for version in range(current + 1, SCHEMA_VERSION + 1):
+        name, fn = MIGRATIONS[version]
+        log.info("Database migration %d: %s", version, name)
+        conn.commit()
+        conn.execute("BEGIN")
+        try:
+            fn(conn)
+            conn.execute(f"PRAGMA user_version={version}")
+            history = schema_history(conn) + [{"version": version, "name": name, "at": now_iso(),
+                                               "app_version": settings.VERSION}]
+            _record(conn, "schema_history", json.dumps(history))
+            conn.execute("COMMIT")
+        except Exception as e:
+            conn.execute("ROLLBACK")
+            raise MigrationFailed(
+                f"Database migration {version} ({name}) failed and was undone, so the database is "
+                f"unchanged at schema version {version - 1}: {type(e).__name__}: {e}") from e
 
 
 def _status_list_sql() -> str:
@@ -330,12 +446,12 @@ def _status_check_current(conn) -> bool:
 
 
 def _migrate(conn):
-    for table, col, typ in MIGRATIONS:
+    for table, col, typ in BASELINE_COLUMNS:
         cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
         if col not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
-            if (table, col) in BACKFILLS:
-                conn.execute(BACKFILLS[(table, col)])
+            if (table, col) in BASELINE_BACKFILLS:
+                conn.execute(BASELINE_BACKFILLS[(table, col)])
     conn.commit()
 
 
@@ -350,8 +466,16 @@ def _rebuild_roles(conn, clean_seen=False):
     path = backup(conn, reason="before-upgrade")
     log.info("Upgrading roles table; backup at %s", path)
     old_cols = {r["name"] for r in conn.execute("PRAGMA table_info(roles)")}
-    tmp = ROLES_TABLE_SQL.replace("CREATE TABLE IF NOT EXISTS roles", "CREATE TABLE roles_new") \
-        .replace("__STATUSES__", _status_list_sql())
+    if clean_seen:   # a table from before the 1.0.0 baseline: the baseline definition
+        tmp = ROLES_TABLE_SQL.replace("CREATE TABLE IF NOT EXISTS roles", "CREATE TABLE roles_new") \
+            .replace("__STATUSES__", _status_list_sql())
+    else:            # the table as it is now, with the new status list in its CHECK
+        current_sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='roles'").fetchone()[0]
+        tmp = re.sub(r"CHECK\s*\(\s*status\s+IN\s*\([^)]*\)\s*\)", f"CHECK (status IN ({_status_list_sql()}))",
+                     current_sql, count=1)
+        tmp = re.sub(r'^CREATE TABLE\s+"?roles"?', "CREATE TABLE roles_new", tmp, count=1)
+    indexes = [r[0] for r in conn.execute("SELECT sql FROM sqlite_master WHERE type='index' "
+                                          "AND tbl_name='roles' AND sql IS NOT NULL")]
     conn.commit()
     conn.execute("PRAGMA foreign_keys=OFF")
     try:
@@ -381,6 +505,9 @@ def _rebuild_roles(conn, clean_seen=False):
         conn.execute(f"INSERT INTO roles_new({', '.join(new_cols)}) SELECT {', '.join(exprs)} FROM roles")
         conn.execute("DROP TABLE roles")
         conn.execute("ALTER TABLE roles_new RENAME TO roles")
+        for sql in indexes:                                # dropping the table dropped its indexes
+            conn.execute(sql.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1)
+                         if "IF NOT EXISTS" not in sql else sql)
         if clean_seen:
             conn.execute("DELETE FROM seen_postings WHERE key NOT IN "
                          "(SELECT job_url FROM roles WHERE job_url IS NOT NULL "

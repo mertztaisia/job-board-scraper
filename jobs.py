@@ -12,6 +12,8 @@ Quick command-line updates for the job tracker database.
   python jobs.py list --status applied                 list roles by status
   python jobs.py scrape                                pull new roles (same as daily_jobs.py)
   python jobs.py descriptions                          fetch missing descriptions (add --all, --no-ai)
+  python jobs.py db                                    database version, migrations and backups
+  python jobs.py db --check --backup                   ...also check it for damage / save a backup now
 
 Statuses: not_applied, interested, applied, interviewing, offer, rejected, withdrawn, closed, not_a_fit
 (closed = no longer accepting applications)
@@ -88,6 +90,48 @@ def pick(c, query: str, include_archived=False):
     return r
 
 
+def db_status(args) -> int:
+    """Where the database stands: its schema version against this code's, the newest app
+    version that has used it, the migrations it has had, and the backups."""
+    import sqlite3
+    import settings
+    path = Path(db.DB_PATH)
+    print(f"Database:      {path}")
+    if not path.exists():
+        print("               (doesn't exist yet: it's created the first time the tracker starts)")
+        return 0
+    raw = sqlite3.connect(f"file:{path.resolve().as_posix()}?mode=ro", uri=True)   # look without upgrading
+    raw.row_factory = sqlite3.Row
+    try:
+        schema = raw.execute("PRAGMA user_version").fetchone()[0]
+        last_app = db._last_app_version(raw)
+        history = db.schema_history(raw)
+        roles = raw.execute("SELECT COUNT(*) FROM roles").fetchone()[0] if schema else 0
+        check = raw.execute("PRAGMA integrity_check").fetchone()[0] if args.check else None
+    finally:
+        raw.close()
+    state = ("up to date" if schema == db.SCHEMA_VERSION
+             else f"will be upgraded to {db.SCHEMA_VERSION} when this version starts (backup first)"
+             if schema < db.SCHEMA_VERSION
+             else f"NEWER than this code knows ({db.SCHEMA_VERSION}): this version won't open it")
+    print(f"Schema:        version {schema} ({state})")
+    print(f"This code:     app {settings.VERSION}, schema {db.SCHEMA_VERSION}")
+    print(f"Last used by:  {last_app or '1.7.0 or earlier'}")
+    print(f"Roles:         {roles}")
+    print("Migrations:    " + ("none since the 1.x baseline (schema 2)" if not history else ""))
+    for h in history:
+        print(f"  {h['version']:>3}  {h['name']}  ({h['at']}, app {h.get('app_version')})")
+    if check is not None:
+        print(f"Check:         {check}")
+    backups = sorted(settings.BACKUP_DIR.glob(f"{path.stem}-*.db")) if settings.BACKUP_DIR.exists() else []
+    upgrades = [b for b in backups if "-before-" in b.name]
+    print(f"Backups:       {len(backups)} in {settings.BACKUP_DIR}"
+          + (f"; latest before an upgrade: {upgrades[-1].name}" if upgrades else ""))
+    if args.backup:
+        print(f"Saved a backup: {db.backup(reason='manual')}")
+    return 0 if check in (None, "ok") else 1
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -132,6 +176,9 @@ def main():
     l.add_argument("--status", help="comma-separated statuses")
 
     sub.add_parser("scrape", help="pull new roles now")
+    dbp = sub.add_parser("db", help="database version, migrations applied and backups")
+    dbp.add_argument("--check", action="store_true", help="also check the database file for damage")
+    dbp.add_argument("--backup", action="store_true", help="also save a backup now")
     de = sub.add_parser("descriptions", help="fetch missing descriptions (ZipRecruiter, LinkedIn) for roles you have")
     de.add_argument("--no-ai", action="store_true", help="don't AI-screen the roles that get a description")
     de.add_argument("--all", action="store_true", help="include Not a fit and archived roles")
@@ -141,6 +188,8 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except (AttributeError, ValueError):
         pass
+    if args.cmd == "db":
+        sys.exit(db_status(args))
     c = db.connect()
 
     if args.cmd == "applied":

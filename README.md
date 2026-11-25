@@ -28,13 +28,35 @@ powershell -ExecutionPolicy Bypass -File service.ps1 logs
 ```powershell
 powershell -ExecutionPolicy Bypass -File service.ps1 uninstall
 ```
-Run `restart` after updating code. `uninstall` removes the auto-start and stops the server.
+Run `restart` after updating code. `uninstall` removes the auto-start and stops the server. The service runs the **latest release** unless you pick a version (see [Versions](#versions)).
 
 ### Or run it in a window (for debugging)
 Double-click `start_tracker.bat`, or run:
 ```powershell
-.\.venv\Scripts\python.exe serve.py
+.\.venv\Scripts\python.exe launch.py
 ```
+
+### Versions
+Each release has a version number (`MAJOR.MINOR.PATCH`: a new feature is the next minor version, a fix the next patch) and a git tag `vX.Y.Z`; [CHANGELOG.md](CHANGELOG.md) says what changed in each. The version that's running shows at the bottom of the sidebar.
+
+- **Which version runs:** the latest release, unless you say otherwise. Run your own unreleased changes with `local`, or an older release by its number:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File service.ps1 restart -Version local
+  ```
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File service.ps1 restart -Version 1.6.0
+  ```
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File service.ps1 restart -Version latest
+  ```
+  The service remembers the version (also after you log in again). In a window: `start_tracker.bat --version 1.6.0`, or `.\.venv\Scripts\python.exe launch.py --version 1.6.0` (add a script to run something else at that version, e.g. `launch.py --version 1.6.0 jobs.py list`).
+- **List the releases:** `service.ps1 versions` (or `launch.py --list`) shows them, what's in your folder, and which version last used your database.
+- **How older releases run:** a release other than the code in your folder is unpacked once into `%LOCALAPPDATA%\JobTracker\versions\<version>` (`JOBS_VERSIONS_DIR`) and run with your folder's settings, database, resumes and virtual environment. It needs Git.
+- **Database versions:** your database stores its schema version (the structure of its tables). Releases 1.0.0 to 1.8.0 all use schema 2. When a release changes the structure, it upgrades your database the first time it starts: it saves a backup first (`jobs-<time>-before-1.9.0.db` in the backup folder), then runs each change it hasn't had yet, in order and in its own transaction, so a change that fails is undone and your data is left as it was.
+- **Going back to an older release** works as long as it uses the same schema. A release that's older than your database's schema refuses to start rather than risk your data (`launch.py --list` shows which schema each release uses). To go back past a schema change, stop the tracker, restore the backup from before the upgrade (or point `JOBS_DB` at it), then start that release.
+- **Check your database** with `.\.venv\Scripts\python.exe jobs.py db`: its schema version, the changes it has had, which version last used it and its backups. Add `--check` to check the file for damage, or `--backup` to save a copy now.
+- **Changing the database (for contributors):** never edit the tables in place. Add a numbered migration in `db.py` (see "Database versions" there) and raise `SCHEMA_VERSION`; every existing database gets the change the next time it starts, and new databases take the same path.
+- **Making a release:** write what changed under **Unreleased** in `CHANGELOG.md` as you go, commit, then run `.\.venv\Scripts\python.exe release.py 1.9.0`. It sets the version, dates the changelog entry, commits and tags `v1.9.0`; then push with `git push origin <branch> --follow-tags`.
 
 ### Configuration
 Settings go in `.env` and are all optional except the API key:
@@ -48,6 +70,8 @@ Settings go in `.env` and are all optional except the API key:
 | `JOBS_RESUME_DIR` | `resumes` (inside `job_search`) | folder whose PDF/DOCX files appear in the resume picker; a relative path starts from `job_search` (`..` = the folder above). Only files in it can be opened from the app, so point it at your resumes, not your whole home folder |
 | `JOBS_BACKUP_DIR` | `%LOCALAPPDATA%\JobTracker\backups` | where daily database backups go |
 | `JOBS_ALLOWED_HOSTS` | — | extra host names the server answers to (only if you open it from another device; see the warning below) |
+| `JOBS_LOG_DIR` | `logs` | where the server log goes |
+| `JOBS_VERSIONS_DIR` | `%LOCALAPPDATA%\JobTrackerersions` | where older releases are unpacked to run them |
 | `JOBS_THREADS` | `8` | web server worker threads |
 
 The server only answers requests addressed to `localhost` / `127.0.0.1`, and refuses changes sent from other websites, so a page you visit can't use the tracker behind your back.
@@ -233,6 +257,8 @@ Each listing is filtered on its own, so a role posted in several cities is kept 
 | `jobs.py` | command-line updates |
 | `daily_jobs.py` | the scraper and filters |
 | `db.py` | database schema and helpers |
+| `launch.py` | starts the tracker at a chosen version (latest release by default) |
+| `release.py`, `CHANGELOG.md` | making a release, and what changed in each |
 | `results/` | each day's raw scrape |
 | `tests/` | automated tests (see below) |
 
