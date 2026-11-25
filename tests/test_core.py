@@ -960,6 +960,64 @@ class ZipRecruiterDescriptionTests(TempDB):
         d = self.conn.execute("SELECT description FROM roles WHERE job_url='https://zip/keep'").fetchone()[0]
         self.assertEqual(d, "Full text. 2+ years of experience.")
 
+    def test_a_board_that_refuses_every_search_is_reported_blocked(self):
+        import logging
+        import sys
+        import types
+        calls = {"linkedin": 0}
+
+        class DF:
+            def __init__(self, rows): self.rows = rows
+            def to_dict(self, _): return self.rows
+            def __len__(self): return len(self.rows)
+
+        def scrape_jobs(site_name, **kw):
+            rows = []
+            for site in site_name:
+                if site == "zip_recruiter":                         # refused every time, like the 307s
+                    logging.getLogger("jobspy.ziprecruiter").error("response status code 307")
+                elif site == "linkedin":                            # answers once, then gets blocked
+                    calls["linkedin"] += 1
+                    if calls["linkedin"] == 1:
+                        rows.append({"site": "linkedin", "job_url": "https://li/1", "title": "x"})
+                    else:
+                        logging.getLogger("jobspy.linkedin").error("response status code 429 (blocked: use a proxy)")
+                else:
+                    rows.append({"site": site, "job_url": f"https://{site}/{len(rows)}{kw['search_term']}", "title": "x"})
+            return DF(rows)
+        fake = types.ModuleType("jobspy")
+        fake.scrape_jobs = scrape_jobs
+        saved, sleep = sys.modules.get("jobspy"), daily_jobs.time.sleep
+        sys.modules["jobspy"], daily_jobs.time.sleep = fake, (lambda s: None)
+        lines = []
+        try:
+            stats = {}
+            daily_jobs.fetch_jobs(TEST_PREFS, lines.append, stats)
+        finally:
+            daily_jobs.time.sleep = sleep
+            if saved is not None:
+                sys.modules["jobspy"] = saved
+            else:
+                del sys.modules["jobspy"]
+        self.assertEqual(stats["blocked"], {"zip_recruiter": "response status code 307"})   # not LinkedIn, not Indeed
+        self.assertIn("  ! ZipRecruiter blocked your searches (response status code 307)", lines)
+
+    def test_ziprecruiter_search_follows_redirects(self):
+        # ZipRecruiter answers searches with a 307 to the same URL (+ zrbc=); JobSpy's
+        # session doesn't follow redirects, so every search came back empty.
+        import jobspy.ziprecruiter as zr
+        from jobspy.model import ScraperInput
+        from jobspy.util import TLSRotating
+        saved = zr.create_session
+        self.addCleanup(setattr, zr, "create_session", saved)
+        self.assertFalse(saved(TLSRotating(None), ScraperInput(site_name=["zip_recruiter"])).allow_redirects)
+        daily_jobs._zip_follow_redirects()
+        daily_jobs._zip_follow_redirects()                                    # only wrapped once
+        self.assertTrue(zr.create_session._follows_redirects)
+        self.assertIs(zr.create_session.__closure__[0].cell_contents, saved)
+        session = zr.create_session(TLSRotating(None), ScraperInput(site_name=["zip_recruiter"]))
+        self.assertTrue(session.allow_redirects)
+
     def test_linkedin_pages_only_for_listings_worth_keeping(self):
         from jobspy.model import CompensationInterval, JobType
         opened = []

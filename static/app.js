@@ -1471,9 +1471,14 @@
     else if (!ai.screened) aiLine = "Nothing new to screen";
     else aiLine = `${n(ai.screened)} screened · ${n(ai.rejected)} marked Not a fit · ${dollars(ai.cost, 4)}`
       + (ai.errors ? ` · <span class="bad-text">${n(ai.errors)} failed</span>` : "");
+    // Boards that refused every search in this pull (blocked), e.g. "ZipRecruiter blocked your searches".
+    const BOARD = { linkedin: "LinkedIn", indeed: "Indeed", zip_recruiter: "ZipRecruiter", glassdoor: "Glassdoor", google: "Google Jobs" };
+    const blocked = Object.entries(r.blocked || {}).map(([site, why]) =>
+      `<div><b>${esc(BOARD[site] || site)} blocked your searches.</b>${why ? ` <span class="cell-dim">(${esc(why)})</span>` : ""}</div>`).join("");
     const body = s.error
       ? `<div class="callout warn" style="margin-bottom:0"><div><b>The pull failed.</b><br>${esc(s.error)}</div></div>`
       : `<div class="run-hero"><b>${n(r.added)}</b> new role${r.added === 1 ? "" : "s"} added</div>
+        ${blocked ? `<div class="callout warn blocked-note"><div>${blocked}<div class="cell-dim">None of its results are in this pull. It usually clears up after a while; if it keeps happening, the board may have changed how it answers.</div></div></div>` : ""}
         <dl class="confirm-meta">
           <dt>Searched</dt><dd>${n(r.searches)} search${r.searches === 1 ? "" : "es"}${took ? ` · took ${took}` : ""}${
             (r.failed_searches || []).length ? ` · <span class="bad-text">${r.failed_searches.length} failed</span>` : ""}</dd>

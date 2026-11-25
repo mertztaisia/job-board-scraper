@@ -653,6 +653,7 @@ button.brand[aria-expanded="true"] .caret { transform: rotate(180deg); }
 .import-status { margin-top: 10px; font-size: 13px; line-height: 1.5; color: var(--text-2); }
 .import-status.error { color: var(--red5); }
 .import-verdict { margin-bottom: 6px; color: var(--orange5); }
+.blocked-note { margin: 0 0 12px; padding: 10px 12px; }
 .import-verdict b { color: var(--orange5); }
 .import-status ul { margin: 4px 0 0; padding-left: 18px; color: var(--text-3); font-size: 12px; }
 .form-grid .autofilled input, .form-grid .autofilled textarea, .form-grid .autofilled select { border-color: var(--green4, #2e9e6a); }

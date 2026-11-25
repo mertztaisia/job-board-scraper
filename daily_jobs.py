@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import logging
 import math
 import random
 import re
@@ -94,9 +95,34 @@ def _clean(v):
 NO_LIMIT_RESULTS = 1000
 
 
+def _zip_follow_redirects():
+    """Make JobSpy's ZipRecruiter search follow redirects.
+
+    Since late Nov 2026 ZipRecruiter answers /jobs-search with a 307 to the same URL
+    plus a zrbc= parameter. JobSpy's session has redirects off and treats anything but
+    a 200 as a failure, so every ZipRecruiter search came back empty. Wrap the session
+    factory JobSpy's ZipRecruiter module uses so its sessions follow redirects."""
+    try:
+        import jobspy.ziprecruiter as zr
+    except ImportError:
+        return
+    if getattr(zr.create_session, "_follows_redirects", False):
+        return
+    original = zr.create_session
+
+    def create_session(*args, **kwargs):
+        session = original(*args, **kwargs)
+        session.allow_redirects = True
+        return session
+
+    create_session._follows_redirects = True
+    zr.create_session = create_session
+
+
 def fetch_jobs(prefs: dict, log=print, stats: dict | None = None) -> list[dict]:
     """Run every search; stats (optional) receives the number of searches and the failed ones."""
     from jobspy import scrape_jobs
+    _zip_follow_redirects()
     stats = stats if stats is not None else {}
     stats.update(searches=0, failed=[])
     results_wanted = (NO_LIMIT_RESULTS if prefs.get("results_all")
@@ -139,29 +165,74 @@ def fetch_jobs(prefs: dict, log=print, stats: dict | None = None) -> list[dict]:
 
     from concurrent.futures import ThreadPoolExecutor
     jobs: dict[str, dict] = {}
-    for r in runs:
-        label = f"{r['search_term']} @ {r['location']}"
-        log(f"Searching: {label}")
-        stats["searches"] += 1
-        found = 0
-        with ThreadPoolExecutor(max_workers=max(1, len(groups))) as pool:
-            futures = [(names, pool.submit(search, names, fetch, r)) for names, fetch in groups]
-            for names, fut in futures:
-                try:
-                    df = fut.result()
-                except Exception as e:  # one bad site/search shouldn't kill the run
-                    log(f"  ! {label} ({', '.join(names)}) failed: {e}")
-                    stats["failed"].append(f"{label} ({', '.join(names)}): {str(e)[:200]}")
-                    continue
-                found += len(df)
-                for row in df.to_dict("records"):
-                    row = {k: _clean(v) for k, v in row.items()}
-                    key = row.get("job_url") or row.get("id")
-                    if key:
-                        jobs.setdefault(key, row)
-        log(f"  {found} results")
-        time.sleep(2)
+    # Per board: how many searches, results and failed searches. JobSpy logs a board's
+    # failure (e.g. "response status code 307") instead of raising it, so its errors are
+    # collected from its log while the pull runs.
+    boards = {s: {"searches": 0, "results": 0, "errors": 0, "error": None} for s in sites}
+    errors = _JobSpyErrors()
+    jobspy_log = logging.getLogger("jobspy")
+    jobspy_log.addHandler(errors)
+    try:
+        for r in runs:
+            label = f"{r['search_term']} @ {r['location']}"
+            log(f"Searching: {label}")
+            stats["searches"] += 1
+            found, per_site, failed_sites = 0, {s: 0 for s in sites}, {}
+            first_error = len(errors.records)
+            with ThreadPoolExecutor(max_workers=max(1, len(groups))) as pool:
+                futures = [(names, pool.submit(search, names, fetch, r)) for names, fetch in groups]
+                for names, fut in futures:
+                    try:
+                        df = fut.result()
+                    except Exception as e:  # one bad site/search shouldn't kill the run
+                        log(f"  ! {label} ({', '.join(names)}) failed: {e}")
+                        stats["failed"].append(f"{label} ({', '.join(names)}): {str(e)[:200]}")
+                        failed_sites.update({s: str(e)[:200] for s in names})
+                        continue
+                    found += len(df)
+                    for row in df.to_dict("records"):
+                        row = {k: _clean(v) for k, v in row.items()}
+                        if row.get("site") in per_site:
+                            per_site[row["site"]] += 1
+                        key = row.get("job_url") or row.get("id")
+                        if key:
+                            jobs.setdefault(key, row)
+            for site, message in errors.records[first_error:]:
+                failed_sites.setdefault(site, message)
+            for site, b in boards.items():
+                b["searches"] += 1
+                b["results"] += per_site[site]
+                if site in failed_sites:
+                    b["errors"] += 1
+                    b["error"] = failed_sites[site]
+            log(f"  {found} results")
+            time.sleep(2)
+    finally:
+        jobspy_log.removeHandler(errors)
+    # A board that failed every search and returned nothing blocked this pull.
+    stats["blocked"] = {s: b["error"] for s, b in boards.items()
+                        if b["searches"] and not b["results"] and b["errors"] == b["searches"]}
+    for site, message in stats["blocked"].items():
+        log(f"  ! {SITE_LABELS.get(site, site)} blocked your searches ({message})")
     return list(jobs.values())
+
+
+SITE_LABELS = {"linkedin": "LinkedIn", "indeed": "Indeed", "zip_recruiter": "ZipRecruiter",
+               "glassdoor": "Glassdoor", "google": "Google Jobs"}
+
+
+class _JobSpyErrors(logging.Handler):
+    """Collects the errors JobSpy's board scrapers log, as (site, message)."""
+    MODULES = {"ziprecruiter": "zip_recruiter"}
+
+    def __init__(self):
+        super().__init__(level=logging.ERROR)
+        self.records: list[tuple[str, str]] = []
+
+    def emit(self, record):
+        parts = record.name.split(".")
+        if len(parts) >= 2 and parts[0] == "jobspy":
+            self.records.append((self.MODULES.get(parts[1], parts[1]), record.getMessage()[:200]))
 
 
 # ----------------------------------------------------------------------------
@@ -736,6 +807,7 @@ def _run(reuse, ignore_seen, use_ai, trigger, log) -> dict:
         result.update(scraped=len(jobs), kept=len(kept), added=len(new_ids), rejected=rejected,
                       sites=sites, details_filled=len(filled_ids), descriptions_added=len(described),
                       searches=fetch_stats.get("searches", 0), failed_searches=fetch_stats.get("failed", []),
+                      blocked=fetch_stats.get("blocked", {}),
                       zip_descriptions=zip_stats, descriptions=desc_stats)
 
         ai = {"screened": 0, "rejected": 0, "unsure": 0, "input_tokens": 0,

@@ -16,6 +16,12 @@ new one with `release.py`. Write changes under **Unreleased** as you go.
   200 per search, which took about 2 minutes a search and got pulls blocked). Descriptions are
   fetched afterwards only for new listings that pass your rules on what the listing shows (no AI),
   and for roles you have that still lack one. The pull summary lists the descriptions fetched per board.
+### Fixed
+- ZipRecruiter searches returned nothing since Nov 23: ZipRecruiter now answers with a redirect,
+  which JobSpy didn't follow, and the empty result wasn't reported as a failure. Searches follow
+  the redirect again.
+- A board that refuses every search in a pull is now reported instead of silently returning
+  nothing: "ZipRecruiter blocked your searches" (or LinkedIn, Indeed, ...) in the pull summary and log.
 
 ## [1.8.0] - 2026-11-25
 ### Added
