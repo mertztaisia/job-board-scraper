@@ -192,17 +192,41 @@
       html += h ? `<h4>${inline(h[1])}</h4>` : `<p>${inline(t)}</p>`;
     }
     if (inList) html += "</ul>";
-    html = html.replace(/(\d{1,2}\s*(?:\+|–|-|to)?\s*\d{0,2}\+?\s*years?)/gi, "<mark>$1</mark>");
-    // Search words are matched in the text between tags, with &amp; etc. turned back into
-    // characters first, so a search like "R&D" matches and "amp" can't split an "&amp;".
-    const toks = (highlight || "").split(/\s+/).filter((t) => t.length > 2);
-    if (toks.length) {
-      const re = new RegExp(`(${toks.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "gi");
-      const unesc = (s) => s.replace(/&(amp|lt|gt|quot|#39);/g, (_, e) => ({ amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" }[e]));
-      html = html.split(/(<[^>]*>)/).map((part, i) => i % 2 ? part
-        : unesc(part).split(re).map((x, j) => j % 2 ? `<mark>${esc(x)}</mark>` : esc(x)).join("")).join("");
+    // Experience ("3+ years") and the search words are highlighted in one pass over the
+    // parsed page's text nodes, never by editing the HTML string: a match can then never land
+    // inside a tag or a link address (descriptions come from employers, so that would let a
+    // crafted description add attributes such as event handlers).
+    const toks = (highlight || "").split(/\s+/).filter((t) => t.length > 2)
+      .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    const re = new RegExp([String.raw`\d{1,2}\s*(?:\+|–|-|to)?\s*\d{0,2}\+?\s*years?`, ...toks].join("|"), "gi");
+    return markText(html, re);
+  }
+
+  // Wrap every match of re in the text of html with <mark>, using DOM nodes (inert <template>
+  // parsing, text set with textContent), so markup and attributes are never touched.
+  function markText(html, re) {
+    const tpl = document.createElement("template");
+    tpl.innerHTML = html;
+    const walker = document.createTreeWalker(tpl.content, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    for (const node of nodes) {
+      const text = node.nodeValue;
+      const matches = [...text.matchAll(re)].filter((m) => m[0]);
+      if (!matches.length) continue;
+      const frag = document.createDocumentFragment();
+      let last = 0;
+      for (const m of matches) {
+        frag.append(text.slice(last, m.index));
+        const mark = document.createElement("mark");
+        mark.textContent = m[0];
+        frag.append(mark);
+        last = m.index + m[0].length;
+      }
+      frag.append(text.slice(last));
+      node.replaceWith(frag);
     }
-    return html;
+    return tpl.innerHTML;
   }
 
   // ------------------------------------------------------------------ Toasts

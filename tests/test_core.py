@@ -94,8 +94,14 @@ class ParsingTests(unittest.TestCase):
         for loc in ("Remote, Canada", "Remote, India", "Remote (Germany)", "Toronto, ON, Remote"):
             self.assertFalse(daily_jobs.location_ok({"location": loc}, prefs)[0], loc)
         for loc in ("Remote", "Remote, US", "Remote (USA)", "Remote, United States", "Remote (Austin, TX)",
-                    "Charlotte, NC, Remote", "Remote - California"):
-            self.assertTrue(daily_jobs.location_ok({"location": loc}, prefs)[0], loc)
+                    "Charlotte, NC, Remote", "Remote - California",
+                    # US-only wordings
+                    "Remote - US only", "Remote (US only)", "US-based remote", "Remote, USA-based", "Remote in USA",
+                    "Remote / US", "Remote | United States", "Remote; USA", "Anywhere in the US", "Remote - Worldwide",
+                    "Remote, US or Canada", "Remote, New Mexico", "Remote, OR"):
+            self.assertTrue(daily_jobs.location_ok({"location": loc, "is_remote": True}, prefs)[0], loc)
+        for loc in ("Toronto, ON, CA", "Remote, EMEA", "Remote - Europe", "Remote, Toronto"):
+            self.assertFalse(daily_jobs.location_ok({"location": loc}, prefs)[0], loc)
 
     def test_evaluate_title_and_years(self):
         today = dt.date.today()
@@ -212,6 +218,22 @@ class ApiSafetyTests(TempDB):
         r = self.client.post("/api/roles", json={"title": "x", "company": "y"},
                              headers={"Origin": "http://localhost", "Sec-Fetch-Site": "same-origin"})
         self.assertEqual(r.status_code, 201)
+
+    def test_cross_site_reads_refused(self):
+        # e.g. a page in the importer's headless browser redirecting it into the API
+        for site in ("cross-site", "same-site"):
+            self.assertEqual(self.client.get("/api/roles", headers={"Sec-Fetch-Site": site}).status_code, 403)
+        for site in ("same-origin", "none", None):
+            headers = {"Sec-Fetch-Site": site} if site else {}
+            self.assertEqual(self.client.get("/api/roles", headers=headers).status_code, 200, site)
+
+    def test_page_has_a_content_security_policy(self):
+        r = self.client.get("/")
+        r.close()
+        csp = r.headers.get("Content-Security-Policy", "")
+        self.assertIn("script-src 'self'", csp)
+        self.assertNotIn("unsafe-inline' https://fonts.googleapis.com; script", csp)
+        self.assertNotIn("'unsafe-inline'", csp.split("script-src", 1)[1].split(";", 1)[0])
 
     def test_file_endpoint_only_serves_resumes(self):
         ok = self.client.get("/api/file", query_string={"path": str(db.BASE_DIR / "resume.pdf")})
@@ -528,6 +550,23 @@ class RoleEditValidationTests(TempDB):
         self.assertNotEqual(out.returncode, 0)
         self.assertIn("Not saved", out.stderr)
         self.assertIsNone(db.get_role(self.conn, self.rid)["applied_at"])
+
+    def test_cli_add_checks_values_like_the_web_app(self):
+        import subprocess, sys, os
+        env = {**os.environ, "JOBS_DB": str(db.DB_PATH)}
+        for extra in (["--pay-min", "inf"], ["--url", "javascript:alert(1)"], ["--pay-max", "1e15"]):
+            out = subprocess.run([sys.executable, "jobs.py", "add", "Odd Engineer", "Acme", *extra],
+                                 capture_output=True, text=True, env=env)
+            self.assertNotEqual(out.returncode, 0, extra)
+            self.assertIn("Not saved", out.stderr)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM roles WHERE title='Odd Engineer'").fetchone()[0], 0)
+
+    def test_ai_numbers_out_of_range_are_dropped(self):
+        db.save_ai_result(self.conn, self.rid, {"verdict": "partial", "match": "partial", "years_min": 10**30,
+                                                "years_max": -1, "pay_min": float("inf"), "pay_max": 150000}, "m")
+        r = db.get_role(self.conn, self.rid)
+        self.assertEqual((r["years_min"], r["years_max"], r["pay_min"]), (None, None, None))
+        self.assertEqual(r["pay_max"] or 150000, 150000)
 
 
 class ClosedStatusTests(TempDB):
@@ -1550,36 +1589,84 @@ class JobImportTests(TempDB):
                 job_import.fetch_page(job_import.normalize_url(bad))
         self.assertEqual(job_import.normalize_url(" jobs.example.com/1 "), "https://jobs.example.com/1")
 
+    def _local_server(self, handler):
+        import http.server
+        import threading
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return srv.server_address[1]
+
     def test_connection_to_a_private_address_is_refused(self):
-        # DNS rebinding: the name checked as public, but the connection went to a private address.
-        import ipaddress
-        import types
+        # DNS rebinding: the name was checked as public, but the connection lands on a private
+        # address. Checked when the socket connects, so it holds however the server closes
+        # the connection (HTTP/1.0 and Connection: close skipped the old after-the-fact check).
+        import http.server
+        import job_import
+        for version in ("HTTP/1.0", "HTTP/1.1"):
+            class H(http.server.BaseHTTPRequestHandler):
+                protocol_version = version
+                def do_GET(self):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("Connection", "close")
+                    self.send_header("Content-Length", "7")
+                    self.end_headers()
+                    self.wfile.write(b"PRIVATE")
+                def log_message(self, *a): pass
+            port = self._local_server(H)
+            saved = job_import._check_public
+            job_import._check_public = lambda url: []          # as if DNS answered with a public address
+            try:
+                with self.assertRaises(job_import.ImportProblem, msg=version) as cm:
+                    job_import.fetch_page(f"http://127.0.0.1:{port}/job")
+            finally:
+                job_import._check_public = saved
+            self.assertIn("local network", str(cm.exception))
+
+    def test_headless_browser_proxy_only_reaches_public_addresses(self):
+        # Everything the headless browser loads goes through _CheckingProxy: a redirect to a
+        # private address written as numbers (http://127.0.0.1:...) is refused.
+        import http.server
+        import socket
         import job_import
 
-        class Resp:
-            def __init__(self, peer):
-                sock = types.SimpleNamespace(getpeername=lambda: (peer, 443))
-                self.raw = types.SimpleNamespace(connection=types.SimpleNamespace(sock=sock))
-                self.is_redirect, self.status_code, self.headers, self.encoding = False, 200, {"content-type": "text/html"}, None
-            def __enter__(self): return self
-            def __exit__(self, *a): return False
-            def iter_content(self, n): yield b"<html>job</html>"
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b"PRIVATE DATA"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            def log_message(self, *a): pass
+        port = self._local_server(H)
 
-        class Session:
-            def __init__(self, peer): self.peer = peer
-            def get(self, url, **kw): return Resp(self.peer)
-        saved = job_import._check_public
-        job_import._check_public = lambda url: [ipaddress.ip_address("93.184.216.34")]
+        def via_proxy(proxy_port, request: bytes) -> bytes:
+            with socket.create_connection(("127.0.0.1", proxy_port), timeout=10) as s:
+                s.sendall(request)
+                data = b""
+                while chunk := s.recv(4096):
+                    data += chunk
+                return data
+        with job_import._CheckingProxy() as proxy:
+            plain = via_proxy(proxy.port, f"GET http://127.0.0.1:{port}/ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".encode())
+            tunnel = via_proxy(proxy.port, f"CONNECT 127.0.0.1:{port} HTTP/1.1\r\n\r\n".encode())
+            named = via_proxy(proxy.port, f"GET http://localhost:{port}/ HTTP/1.1\r\nHost: localhost\r\n\r\n".encode())
+        for answer in (plain, tunnel, named):
+            self.assertTrue(answer.startswith(b"HTTP/1.1 403"), answer[:60])
+            self.assertNotIn(b"PRIVATE", answer)
+        # The same request is passed through when the address is allowed.
+        saved = job_import._proxy_allows
+        job_import._proxy_allows = lambda ip: True
         try:
-            with self.assertRaises(job_import.ImportProblem):
-                job_import.fetch_page("https://jobs.example.com/1", session=Session("127.0.0.1"))
-            self.assertEqual(job_import.fetch_page("https://jobs.example.com/1", session=Session("93.184.216.34")),
-                             ("https://jobs.example.com/1", "<html>job</html>"))
+            with job_import._CheckingProxy() as proxy:
+                ok = via_proxy(proxy.port, f"GET http://127.0.0.1:{port}/ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".encode())
         finally:
-            job_import._check_public = saved
+            job_import._proxy_allows = saved
+        self.assertIn(b"PRIVATE DATA", ok)
 
-    def test_headless_browser_is_pinned_to_the_checked_address(self):
-        import ipaddress
+    def test_headless_browser_runs_through_the_proxy(self):
         import subprocess
         import job_import
         seen = {}
@@ -1589,15 +1676,27 @@ class JobImportTests(TempDB):
             return subprocess.CompletedProcess(cmd, 0, stdout=b"<html>" + b"x" * 600 + b"</html>")
         saved = (job_import.find_browser, job_import._check_public, subprocess.run)
         job_import.find_browser = lambda: "chrome"
-        job_import._check_public = lambda url: [ipaddress.ip_address("2606:4700::1")]
+        job_import._check_public = lambda url: []
         subprocess.run = run
         try:
             self.assertTrue(job_import.render_page("https://jobs.example.com/1"))
         finally:
             job_import.find_browser, job_import._check_public, subprocess.run = saved
-        rules = next(a for a in seen["cmd"] if a.startswith("--host-resolver-rules="))
-        self.assertIn("MAP jobs.example.com [2606:4700::1]", rules)
-        self.assertIn("MAP localhost ~NOTFOUND", rules)
+        self.assertTrue(any(a.startswith("--proxy-server=http://127.0.0.1:") for a in seen["cmd"]))
+        self.assertIn("--proxy-bypass-list=<-loopback>", seen["cmd"])
+
+    def test_odd_job_posting_data_doesnt_crash(self):
+        import job_import
+        for exp in ({"monthsOfExperience": [36]}, {"monthsOfExperience": {}}, {"monthsOfExperience": "1e999"},
+                    {"monthsOfExperience": True}, ["x"]):
+            page = ('<html><head><title>Engineer</title><script type="application/ld+json">'
+                    + json.dumps({"@type": "JobPosting", "title": "Engineer", "hiringOrganization": ["Acme"],
+                                  "experienceRequirements": exp, "baseSalary": {"value": [1]}})
+                    + "</script></head><body><h1>Engineer</h1><p>Build things.</p></body></html>")
+            r, _ = self.run_import({"*": page})
+            self.assertEqual(r["fields"].get("title"), "Engineer", exp)
+            self.assertNotIn("years_min", r["fields"])
+        self.assertEqual(job_import.from_job_posting({"experienceRequirements": {"monthsOfExperience": 36}})["years_min"], 3)
 
     def test_linkedin_page(self):
         page = """<html><body><h1 class="top-card-layout__title">Platform Engineer</h1>

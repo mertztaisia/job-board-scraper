@@ -99,28 +99,70 @@ def _ip_is_public(ip) -> bool:
     return ip.is_global and not ip.is_multicast
 
 
-def _check_peer(resp, url: str):
-    """The address the request actually connected to must be public too. The name is looked
-    up again when connecting, so a site could answer the check above with a public address
-    and the connection with a private one (DNS rebinding). Skipped behind a proxy, where the
-    peer is the proxy."""
+class _PrivateAddress(OSError):
+    """A connection that would have gone to this computer or a private network."""
+
+
+def _public_only_session():
+    """A requests session whose direct connections are checked when the socket connects,
+    before anything is sent (before the TLS handshake too). The name is looked up again
+    when connecting, so a site could answer the check in _check_public with a public
+    address and the connection with a private one (DNS rebinding); this catches that, on
+    every connection, however the server closes it. Connections through a proxy set in
+    the environment go to the proxy and aren't checked."""
     import requests
-    if requests.utils.get_environ_proxies(url):
-        return
-    try:
-        sock = resp.raw.connection.sock
-        peer = sock.getpeername()[0] if sock else None
-    except (AttributeError, OSError):
-        peer = None
-    if peer and not _ip_is_public(ipaddress.ip_address(peer.split("%")[0])):
-        raise ImportProblem(_NOT_PUBLIC)
+    from requests.adapters import HTTPAdapter
+    from urllib3.connection import HTTPConnection, HTTPSConnection
+    from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+
+    def checked(base):
+        class Checked(base):
+            def _new_conn(self):
+                sock = super()._new_conn()
+                try:
+                    peer = sock.getpeername()[0]
+                    public = _ip_is_public(ipaddress.ip_address(peer.split("%")[0]))
+                except (OSError, ValueError):
+                    public = False
+                if not public:
+                    sock.close()
+                    raise _PrivateAddress(_NOT_PUBLIC)
+                return sock
+        return Checked
+
+    class Pool(HTTPConnectionPool):
+        ConnectionCls = checked(HTTPConnection)
+
+    class SecurePool(HTTPSConnectionPool):
+        ConnectionCls = checked(HTTPSConnection)
+
+    class PublicOnly(HTTPAdapter):
+        def init_poolmanager(self, *args, **kwargs):
+            super().init_poolmanager(*args, **kwargs)
+            self.poolmanager.pool_classes_by_scheme = {"http": Pool, "https": SecurePool}
+
+    session = requests.Session()
+    adapter = PublicOnly(max_retries=0)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+
+def _caused_by_private(e, depth=0) -> bool:
+    """True if a requests/urllib3 error was raised by the private-address check."""
+    if e is None or depth > 8:
+        return False
+    if isinstance(e, _PrivateAddress):
+        return True
+    nested = [e.__cause__, e.__context__, getattr(e, "reason", None)] + list(getattr(e, "args", ()))
+    return any(_caused_by_private(x, depth + 1) for x in nested if isinstance(x, BaseException))
 
 
 def fetch_page(url: str, session=None) -> tuple[str, str]:
     """(final URL, page text) for a public page. Every redirect is checked too.
     Raises ImportProblem with a message for the user."""
     import requests
-    session = session or requests.Session()
+    session = session or _public_only_session()
     for _ in range(MAX_REDIRECTS + 1):
         _check_public(url)
         try:
@@ -128,9 +170,10 @@ def fetch_page(url: str, session=None) -> tuple[str, str]:
                                              "Accept-Language": "en-US,en;q=0.9"},
                                timeout=TIMEOUT, allow_redirects=False, stream=True)
         except requests.RequestException as e:
+            if _caused_by_private(e):
+                raise ImportProblem(_NOT_PUBLIC) from None
             raise ImportProblem(f"Couldn't load the page ({type(e).__name__}).", retry=True) from None
         with resp:
-            _check_peer(resp, url)
             if resp.is_redirect and resp.headers.get("location"):
                 url = urljoin(url, resp.headers["location"])
                 continue
@@ -282,7 +325,8 @@ def from_job_posting(jp: dict) -> dict:
     out: dict = {}
     out["title"] = html_lib.unescape(str(jp.get("title") or "")).strip() or None
     org = jp.get("hiringOrganization")
-    out["company"] = (org.get("name") if isinstance(org, dict) else org) or None
+    company = org.get("name") if isinstance(org, dict) else org
+    out["company"] = html_lib.unescape(company).strip() or None if isinstance(company, str) else None
     locs = jp.get("jobLocation")
     locs = locs if isinstance(locs, list) else [locs] if locs else []
     places = []   # (has a city, in the US, text)
@@ -328,9 +372,11 @@ def from_job_posting(jp: dict) -> dict:
     exp = jp.get("experienceRequirements")
     months = exp.get("monthsOfExperience") if isinstance(exp, dict) else None
     try:
-        if months not in (None, ""):
-            out["years_min"] = int(float(months) // 12)
-    except ValueError:
+        if isinstance(months, (int, float, str)) and not isinstance(months, bool) and months != "":
+            years = float(months) // 12
+            if 0 <= years <= 50:
+                out["years_min"] = int(years)
+    except (ValueError, OverflowError):
         pass
     return {k: v for k, v in out.items() if v not in (None, "")}
 
@@ -681,7 +727,10 @@ def _parse(page: str, site: str | None) -> dict:
         values.append((from_linkedin_page(soup), "board"))
     jp = job_posting_data(soup)
     if jp:
-        values.append((from_job_posting(jp), "structured"))
+        try:
+            values.append((from_job_posting(jp), "structured"))
+        except (TypeError, ValueError, AttributeError, OverflowError):
+            pass   # unusual JobPosting data: fall back to the page's meta tags and text
     values.append((from_heading(soup), "page"))
     values.append((from_meta(soup), "page"))
     page_title = soup.title.get_text(strip=True) if soup.title else None
@@ -724,27 +773,152 @@ def find_browser() -> str | None:
     return None
 
 
+class _CheckingProxy:
+    """A tiny HTTP proxy on 127.0.0.1 for the headless browser. Every connection the page
+    makes (the page itself, redirects, scripts, images, fetches, WebSockets) goes through it,
+    and it connects only to public addresses, looking each name up itself and connecting to
+    the address it checked. Without it a job page could redirect the browser to a private
+    address written as numbers (http://127.0.0.1:...), which no name rule can stop."""
+
+    def __init__(self):
+        import socketserver
+        import threading
+        proxy = self
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                proxy._handle(self.request)
+
+        class Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
+            daemon_threads = True
+            allow_reuse_address = True
+
+        self.server = Server(("127.0.0.1", 0), Handler)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.server.shutdown()
+        self.server.server_close()
+
+    @staticmethod
+    def _connect(host: str, port: int):
+        """A socket to host:port if every address it has is public, else None."""
+        try:
+            infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+            ips = [ipaddress.ip_address(i[4][0].split("%")[0]) for i in infos]
+        except (OSError, UnicodeError, ValueError):
+            return None
+        if not ips or not all(_proxy_allows(ip) for ip in ips):
+            return None
+        try:
+            return socket.create_connection((str(ips[0]), port), timeout=TIMEOUT)
+        except OSError:
+            return None
+
+    def _handle(self, client):
+        client.settimeout(TIMEOUT)
+        try:
+            head = b""
+            while b"\r\n\r\n" not in head and len(head) < 65536:
+                chunk = client.recv(4096)
+                if not chunk:
+                    return
+                head += chunk
+            head, _, rest = head.partition(b"\r\n\r\n")
+            request_line, *header_lines = head.decode("latin-1").split("\r\n")
+            method, target, version = request_line.split(" ", 2)
+            if method == "CONNECT":
+                host, _, port = target.rpartition(":")
+                host, port = host.strip("[]"), int(port)
+            else:
+                parts = urlsplit(target)
+                if parts.scheme != "http" or not parts.hostname:
+                    raise ValueError(target)
+                host, port = parts.hostname, parts.port or 80
+            upstream = self._connect(host, port)
+            if upstream is None:
+                client.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                return
+            with upstream:
+                if method == "CONNECT":
+                    client.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    if rest:
+                        upstream.sendall(rest)
+                else:
+                    # One request per connection, so a reused browser connection can't
+                    # carry a request for another (unchecked) host to this upstream.
+                    path = parts.path or "/"
+                    if parts.query:
+                        path += "?" + parts.query
+                    kept = [h for h in header_lines
+                            if h.split(":", 1)[0].strip().lower() not in ("connection", "proxy-connection", "keep-alive")]
+                    upstream.sendall(f"{method} {path} {version}\r\n".encode("latin-1")
+                                     + "".join(h + "\r\n" for h in kept + ["Connection: close"]).encode("latin-1")
+                                     + b"\r\n" + rest)
+                self._pipe(client, upstream)
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                client.close()
+            except OSError:
+                pass
+
+    @staticmethod
+    def _pipe(a, b):
+        import threading
+
+        def copy(src, dst):
+            try:
+                while True:
+                    data = src.recv(65536)
+                    if not data:
+                        break
+                    dst.sendall(data)
+            except OSError:
+                pass
+            finally:
+                try:
+                    dst.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
+        t = threading.Thread(target=copy, args=(b, a), daemon=True)
+        t.start()
+        copy(a, b)
+        t.join(RENDER_TIMEOUT)
+
+
+def _proxy_allows(ip) -> bool:
+    return _ip_is_public(ip)
+
+
 def render_page(url: str) -> str | None:
     """The page as a browser shows it after its scripts run (headless, with a fresh
     throwaway profile: none of your sign-ins or cookies). None if no browser is installed
-    or it fails. The link is checked to be public first, like a plain fetch, and the browser
-    is pinned to the address that was checked, so the site's name can't be switched to a
-    private address afterwards; localhost names are blocked for everything the page loads."""
+    or it fails. The link is checked to be public first, like a plain fetch, and everything
+    the browser loads goes through _CheckingProxy, which only connects to public addresses."""
     import subprocess
     import tempfile
     exe = find_browser()
     if not exe:
         return None
-    ips = _check_public(url)
-    host = urlsplit(url).hostname
-    pin = f"[{ips[0]}]" if ips[0].version == 6 else str(ips[0])
-    rules = f"MAP {host} {pin}, MAP localhost ~NOTFOUND, MAP *.localhost ~NOTFOUND"
-    with tempfile.TemporaryDirectory(prefix="jobtracker-browser-", ignore_cleanup_errors=True) as profile:
+    _check_public(url)
+    with _CheckingProxy() as proxy, \
+            tempfile.TemporaryDirectory(prefix="jobtracker-browser-", ignore_cleanup_errors=True) as profile:
         try:
             out = subprocess.run(
                 [exe, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
                  "--disable-extensions", "--disable-sync", "--mute-audio", "--blink-settings=imagesEnabled=false",
-                 f"--user-data-dir={profile}", f"--host-resolver-rules={rules}", f"--virtual-time-budget={RENDER_WAIT_MS}", "--dump-dom", url],
+                 f"--user-data-dir={profile}",
+                 # All traffic through the proxy, loopback included (Chrome skips the proxy for
+                 # localhost unless told not to); QUIC can't go through an HTTP proxy.
+                 f"--proxy-server=http://127.0.0.1:{proxy.port}", "--proxy-bypass-list=<-loopback>",
+                 "--disable-quic", f"--virtual-time-budget={RENDER_WAIT_MS}", "--dump-dom", url],
                 capture_output=True, timeout=RENDER_TIMEOUT)
         except (OSError, subprocess.SubprocessError):
             return None

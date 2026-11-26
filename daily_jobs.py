@@ -502,17 +502,47 @@ def _parse_place(s: str) -> tuple[str, str]:
     return city, US_STATES.get(state, state)
 
 
+US_WORDS_RE = re.compile(r"\b(us|usa|u\.s\.(a\.)?|united states( of america)?|america|nationwide)\b", re.I)
+# Words that say nothing about the country.
+NO_COUNTRY_WORDS = {"remote", "only", "based", "in", "the", "anywhere", "within", "work", "from", "home",
+                    "wfh", "fully", "100%", "worldwide", "global", "flexible", "hybrid", "or", "and"}
+NON_US_RE = re.compile(
+    r"\b(canada|mexico|uk|united kingdom|england|scotland|wales|ireland|germany|france|spain|portugal|"
+    r"italy|netherlands|belgium|switzerland|austria|sweden|norway|denmark|finland|poland|romania|"
+    r"ukraine|czech|hungary|greece|turkey|israel|india|pakistan|bangladesh|philippines|singapore|"
+    r"malaysia|indonesia|vietnam|thailand|japan|china|korea|taiwan|hong kong|australia|new zealand|"
+    r"brazil|argentina|colombia|chile|peru|costa rica|south africa|nigeria|kenya|egypt|europe|emea|"
+    r"apac|latam|eu|ontario|quebec|british columbia|alberta|manitoba|saskatchewan|nova scotia)\b", re.I)
+CANADIAN_PROVINCES = {"on", "qc", "bc", "ab", "mb", "sk", "ns", "nb", "nl", "pe", "yt", "nt", "nu"}
+
+
+def remote_in_us(loc: str) -> bool:
+    """Whether a remote role's location allows working from the US. "Remote" alone (or with
+    only words like "anywhere") is taken as yes; a US word or state is yes ("Remote - US only",
+    "US-based", "Charlotte, NC"); a non-US country, region or Canadian province is no
+    ("Remote, Canada", "Toronto, ON, CA"); anything else, such as a city alone, is no."""
+    loc = loc or ""
+    if US_WORDS_RE.search(loc):
+        return True
+    pieces = [p.strip(" .").lower() for p in re.split(r"[,/|;()–—]|\s-\s", loc) if p.strip(" .")]
+    state_names = set(US_STATES.values())
+    named_states = [n for n in state_names if re.search(rf"\b{re.escape(n)}\b", loc, re.I)]
+    without_states = loc
+    for n in named_states:   # so "New Mexico" isn't read as Mexico
+        without_states = re.sub(rf"\b{re.escape(n)}\b", " ", without_states, flags=re.I)
+    if NON_US_RE.search(without_states) or any(p in CANADIAN_PROVINCES for p in pieces):
+        return False
+    if named_states or any(p in US_STATES for p in pieces):
+        return True
+    words = re.findall(r"[\w%]+", loc.lower())
+    return all(w in NO_COUNTRY_WORDS for w in words)
+
+
 def location_ok(job: dict, prefs: dict) -> tuple[bool, str]:
     loc = job.get("location") or ""
     parts = [p.strip() for p in loc.split(",") if p.strip()]
     if job.get("is_remote") or "remote" in loc.lower():
-        # The word "Remote" says nothing about the country, so drop it before checking:
-        # "Remote" alone is fine, "Remote, Canada" or "Remote (India)" isn't.
-        places = [q for q in (re.sub(r"\bremote\b|[()]", " ", p, flags=re.I).strip(" -–").lower()
-                              for p in parts) if q]
-        us = (not places
-              or any(p in ("usa", "us", "u.s.", "united states", "united states of america")
-                     or p in US_STATES or p in US_STATES.values() for p in places))
+        us = remote_in_us(loc)
         where = "Remote" + (f" ({loc})" if loc and "remote" not in loc.lower() else "")
         return bool(prefs["locations"].get("include_remote")) and us, where
     city, state = _parse_place(loc)

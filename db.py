@@ -1213,7 +1213,19 @@ def update_role(conn, role_id: int, changes: dict, note=None, source=None) -> di
     return get_role(conn, role_id)
 
 
+def _sane_number(v, top):
+    """v if it's a real number from 0 to top, else None (AI output isn't trusted blindly)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    try:
+        return v if math.isfinite(v) and 0 <= v <= top else None
+    except OverflowError:
+        return None
+
+
 def save_ai_result(conn, role_id: int, result: dict, model: str):
+    result = {**result, **{k: _sane_number(result.get(k), 100) for k in ("years_min", "years_max")},
+              **{k: _sane_number(result.get(k), 100_000_000) for k in ("pay_min", "pay_max")}}
     conn.execute(
         "UPDATE roles SET ai_verdict=?, ai_match=?, ai_reason=?, ai_tags=?, ai_flags=?, "
         "ai_screened_at=?, ai_model=?, "

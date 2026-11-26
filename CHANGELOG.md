@@ -27,6 +27,21 @@ new one with `release.py`. Write changes under **Unreleased** as you go.
   the redirect again.
 - A board that refuses every search in a pull is now reported instead of silently returning
   nothing: "ZipRecruiter blocked your searches" (or LinkedIn, Indeed, ...) in the pull summary and log.
+- Remote roles abroad ("Remote, Canada", "Toronto, ON, CA") no longer pass the US location rule,
+  and US-only wordings ("Remote - US only", "US-based remote") are recognised.
+- Huge numbers (years, pay, weekly targets, values the AI returns) and notes that aren't text
+  give a clear message instead of a server error; the command line `add` checks values too.
+- Roles added and marked Not a fit in the same second are archived automatically like the rest.
+- Unusual job data on a pasted page no longer makes Add role → From a link fail.
+### Security
+- Search highlighting works on the page's text only, so a crafted job description can't add
+  attributes (such as event handlers) to the page. The page also sends a Content-Security-Policy
+  that allows only the app's own script.
+- Only http(s) links are saved as job links or shown as buttons.
+- The API refuses reads started by other sites (Sec-Fetch-Site cross-site or same-site).
+- Add role → From a link: the address is checked again when the connection is made (DNS
+  rebinding), and the headless browser loads everything through a built-in proxy that only
+  connects to public addresses.
 
 ## [1.8.0] - 2026-11-25
 ### Added

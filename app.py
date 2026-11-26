@@ -45,6 +45,12 @@ def same_origin_only():
       header and are allowed."""
     if _hostname(request.host) not in settings.ALLOWED_HOSTS:
         abort(403)
+    # Reads too: a browser marks requests started by another site (a page, a redirect, an
+    # embedded resource) as cross-site or same-site. The app's own fetches are same-origin
+    # and a typed address is "none", so refusing the rest stops e.g. a job page opened by
+    # the importer's headless browser from redirecting it into the API.
+    if request.path.startswith("/api/") and request.headers.get("Sec-Fetch-Site") in ("cross-site", "same-site"):
+        abort(403)
     if request.method not in ("GET", "HEAD", "OPTIONS"):
         origin = request.headers.get("Origin")
         if origin is not None and _origin_netloc(origin) != request.host.lower():
@@ -73,7 +79,17 @@ def no_cache(resp):
     # Always serve the latest UI files after an update (no stale cached JS/CSS).
     if request.path == "/" or request.path.startswith("/static/"):
         resp.headers["Cache-Control"] = "no-cache"
+    if request.path == "/":
+        # Defence in depth against injected markup: only this app's own script runs (no inline
+        # scripts or event-handler attributes), and the page can only talk to this server.
+        resp.headers["Content-Security-Policy"] = CSP
     return resp
+
+
+CSP = ("default-src 'self'; script-src 'self'; "
+       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+       "font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data:; connect-src 'self'; "
+       "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
 
 
 @contextmanager

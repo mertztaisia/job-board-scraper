@@ -212,6 +212,9 @@ def main():
 
     elif args.cmd == "add":
         st = norm_status(args.status)
+        # Same checks as the web app (web links only, sane numbers); a ValueError saves nothing.
+        db.check_role_changes({"title": args.title, "company": args.company, "job_url": args.url,
+                               "location": args.location, "pay_min": args.pay_min, "pay_max": args.pay_max})
         existing = db.find_existing(c, args.title, args.company, args.url, location=args.location)
         if existing:
             print("Already in the database:")
