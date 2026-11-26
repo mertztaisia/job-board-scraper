@@ -19,7 +19,8 @@ new one with `release.py`. Write changes under **Unreleased** as you go.
 ### Removed
 - Google Jobs is no longer a job site option. Google Search now answers programs that don't run
   JavaScript (JobSpy included) with a "turn on JavaScript" page instead of results, so every Google
-  search came back empty, and JobSpy has no fix. Saved preferences that still list it simply skip it.
+  search came back empty, and JobSpy has no fix. Saved preferences that still list it skip it; if it
+  was the only site picked, pulls use the default sites (LinkedIn, Indeed and ZipRecruiter) instead.
 ### Fixed
 - ZipRecruiter searches returned nothing since Nov 23: ZipRecruiter now answers with a redirect,
   which JobSpy didn't follow, and the empty result wasn't reported as a failure. Searches follow
