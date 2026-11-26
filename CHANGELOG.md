@@ -16,6 +16,10 @@ new one with `release.py`. Write changes under **Unreleased** as you go.
   200 per search, which took about 2 minutes a search and got pulls blocked). Descriptions are
   fetched afterwards only for new listings that pass your rules on what the listing shows (no AI),
   and for roles you have that still lack one. The pull summary lists the descriptions fetched per board.
+### Removed
+- Google Jobs is no longer a job site option. Google Search now answers programs that don't run
+  JavaScript (JobSpy included) with a "turn on JavaScript" page instead of results, so every Google
+  search came back empty, and JobSpy has no fix. Saved preferences that still list it simply skip it.
 ### Fixed
 - ZipRecruiter searches returned nothing since Nov 23: ZipRecruiter now answers with a redirect,
   which JobSpy didn't follow, and the empty result wasn't reported as a failure. Searches follow

@@ -9,6 +9,7 @@ Every test uses a throwaway database in a temp folder; jobs.db is never touched.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import shutil
 import tempfile
 import unittest
@@ -389,6 +390,19 @@ class PreferenceValidationTests(TempDB):
         self.assertEqual((db.DEFAULT_PREFS["locations"]["value"], db.DEFAULT_PREFS["prompt"],
                           db.DEFAULT_PREFS["interests"]), ([], "", []))
         self.assertIn("Location: fully remote within the US", ai_screen.build_system_prompt(db.DEFAULT_PREFS))
+
+    def test_google_jobs_is_no_longer_offered(self):
+        # Google answers JobSpy with an "enablejs" page, so it's gone from the job sites.
+        self.assertNotIn("google", db.SITES)
+        self.assertIn("Unknown job site: google.", db.validate_prefs(self.prefs_with(sites=["linkedin", "google"])))
+        # Older saved preferences that still list it are cleaned when read, so pulls skip it
+        # and saving them again works.
+        self.conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES('preferences', ?)",
+                          (json.dumps({"sites": ["linkedin", "google"]}),))
+        self.assertEqual(db.get_prefs(self.conn)["sites"], ["linkedin"])
+        self.assertEqual(db.validate_prefs(db.get_prefs(self.conn)), [])
+        self.conn.execute("UPDATE settings SET value=? WHERE key='preferences'", (json.dumps({"sites": ["google"]}),))
+        self.assertEqual(db.get_prefs(self.conn)["sites"], db.DEFAULT_PREFS["sites"])
 
     def test_needs_a_location_or_remote(self):
         p = self.prefs_with(locations__include_remote=False)

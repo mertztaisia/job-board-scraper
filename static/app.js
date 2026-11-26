@@ -250,7 +250,7 @@
 
   // AI fit and source chips (multi-select; none selected = all).
   const SITE_LABELS = { linkedin: "LinkedIn", indeed: "Indeed", zip_recruiter: "ZipRecruiter", glassdoor: "Glassdoor",
-    google: "Google Jobs", manual: "Added by you" };
+    manual: "Added by you" };
   function renderChipFilters() {
     const fits = [...Object.entries(META.match_levels || {}).map(([k, v]) => [k, v.label]), ["unscreened", "Not screened"]];
     $("#fitFilter").innerHTML = fits.map(([k, l]) =>
@@ -1472,7 +1472,7 @@
     else aiLine = `${n(ai.screened)} screened · ${n(ai.rejected)} marked Not a fit · ${dollars(ai.cost, 4)}`
       + (ai.errors ? ` · <span class="bad-text">${n(ai.errors)} failed</span>` : "");
     // Boards that refused every search in this pull (blocked), e.g. "ZipRecruiter blocked your searches".
-    const BOARD = { linkedin: "LinkedIn", indeed: "Indeed", zip_recruiter: "ZipRecruiter", glassdoor: "Glassdoor", google: "Google Jobs" };
+    const BOARD = { linkedin: "LinkedIn", indeed: "Indeed", zip_recruiter: "ZipRecruiter", glassdoor: "Glassdoor" };
     const blocked = Object.entries(r.blocked || {}).map(([site, why]) =>
       `<div><b>${esc(BOARD[site] || site)} blocked your searches.</b>${why ? ` <span class="cell-dim">(${esc(why)})</span>` : ""}</div>`).join("");
     const body = s.error
@@ -1515,7 +1515,7 @@
     "ML platform engineer", "MLOps engineer", "AI product engineer", "backend engineer", "full stack engineer", "software engineer"];
   const INTEREST_SUGGESTIONS = ["AI", "LLMs", "Machine learning", "Agents", "Developer tools", "Infrastructure", "Data",
     "Fintech", "Healthcare", "Climate", "Robotics", "Security", "Consumer", "B2B SaaS", "Education", "Startups"];
-  const SITES = [["linkedin", "LinkedIn"], ["indeed", "Indeed"], ["zip_recruiter", "ZipRecruiter"], ["glassdoor", "Glassdoor"], ["google", "Google Jobs"]];
+  const SITES = [["linkedin", "LinkedIn"], ["indeed", "Indeed"], ["zip_recruiter", "ZipRecruiter"], ["glassdoor", "Glassdoor"]];
   const JOB_TYPES = [["fulltime", "Full-time"], ["contract", "Contract"], ["parttime", "Part-time"], ["internship", "Internship"]];
   const WORKPLACES = [["onsite", "On-site"], ["hybrid", "Hybrid"], ["remote", "Remote"]];
   const SIZES = [["startup", "Startup (<50)"], ["small", "Small (50–200)"], ["mid", "Mid-size (200–1k)"], ["large", "Large (1k–10k)"], ["enterprise", "Enterprise (10k+)"]];
@@ -1594,7 +1594,7 @@
            </ul>
            <div class="estimate">This setup runs <b>${searchesPerPull()}</b> searches per pull.</div>`,
           badges(["Search"]))}
-        ${row("Job sites", "Glassdoor and Google Jobs are less reliable to scrape.", checks("sites", SITES, p.sites), badges(["Search"]))}
+        ${row("Job sites", "Glassdoor is less reliable to scrape.", checks("sites", SITES, p.sites), badges(["Search"]))}
         ${row("Posted within", "Only postings newer than this.",
           `<div class="inline"><label class="field" style="max-width:220px"><select data-num="posted_within_hours">
             ${[[6, "Last 6 hours"], [12, "Last 12 hours"], [24, "Last 24 hours"], [48, "Last 2 days"], [72, "Last 3 days"], [168, "Last week"]].map(([v, l]) => `<option value="${v}" ${+p.posted_within_hours === v ? "selected" : ""}>${l}</option>`).join("")}

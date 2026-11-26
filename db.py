@@ -677,10 +677,18 @@ def _deep_merge(base: dict, over: dict) -> dict:
 def get_prefs(conn) -> dict:
     row = conn.execute("SELECT value FROM settings WHERE key='preferences'").fetchone()
     saved = json.loads(row["value"]) if row else {}
-    return _deep_merge(DEFAULT_PREFS, saved)
+    prefs = _deep_merge(DEFAULT_PREFS, saved)
+    # Drop boards that are no longer offered (Google Jobs) from older saved preferences, so
+    # pulls skip them and the next save passes validation.
+    if isinstance(prefs.get("sites"), list):
+        prefs["sites"] = [s for s in prefs["sites"] if s in SITES] or list(DEFAULT_PREFS["sites"])
+    return prefs
 
 
-SITES = {"linkedin", "indeed", "zip_recruiter", "glassdoor", "google"}
+# Google Jobs isn't offered: Google Search now answers clients that don't run JavaScript
+# (JobSpy included) with an "enablejs" redirect page instead of results, so every Google
+# search came back empty.
+SITES = {"linkedin", "indeed", "zip_recruiter", "glassdoor"}
 AI_MODELS = {"claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"}
 
 

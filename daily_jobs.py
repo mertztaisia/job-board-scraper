@@ -218,7 +218,7 @@ def fetch_jobs(prefs: dict, log=print, stats: dict | None = None) -> list[dict]:
 
 
 SITE_LABELS = {"linkedin": "LinkedIn", "indeed": "Indeed", "zip_recruiter": "ZipRecruiter",
-               "glassdoor": "Glassdoor", "google": "Google Jobs"}
+               "glassdoor": "Glassdoor"}
 
 
 class _JobSpyErrors(logging.Handler):
