@@ -8,6 +8,7 @@
 *.db-journal
 *.run.lock
 results/
+resumes/
 seen_jobs.json*
 
 # Python
