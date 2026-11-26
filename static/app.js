@@ -5,6 +5,8 @@
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  // Only http(s) links become buttons, so a javascript: or data: link saved in a role can't run.
+  const webUrl = (u) => typeof u === "string" && /^https?:\/\/[^\s/]+/i.test(u.trim());
 
   const store = {
     get(k, d) { try { const v = localStorage.getItem("jt." + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -191,9 +193,14 @@
     }
     if (inList) html += "</ul>";
     html = html.replace(/(\d{1,2}\s*(?:\+|–|-|to)?\s*\d{0,2}\+?\s*years?)/gi, "<mark>$1</mark>");
-    for (const tok of (highlight || "").split(/\s+/).filter((t) => t.length > 2)) {
-      const re = new RegExp(`(?![^<]*>)(${tok.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi");
-      html = html.replace(re, "<mark>$1</mark>");
+    // Search words are matched in the text between tags, with &amp; etc. turned back into
+    // characters first, so a search like "R&D" matches and "amp" can't split an "&amp;".
+    const toks = (highlight || "").split(/\s+/).filter((t) => t.length > 2);
+    if (toks.length) {
+      const re = new RegExp(`(${toks.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "gi");
+      const unesc = (s) => s.replace(/&(amp|lt|gt|quot|#39);/g, (_, e) => ({ amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" }[e]));
+      html = html.split(/(<[^>]*>)/).map((part, i) => i % 2 ? part
+        : unesc(part).split(re).map((x, j) => j % 2 ? `<mark>${esc(x)}</mark>` : esc(x)).join("")).join("");
     }
     return html;
   }
@@ -534,8 +541,8 @@
           ${r.is_remote ? '<span class="tag remote">Remote</span>' : ""}
           <span style="flex:1"></span>
           <button class="btn small" id="archiveBtn" title="${r.archived ? "Show this role in default views again" : "Hide from default views and search"}">${r.archived ? "Unarchive" : "Archive"}</button>
-          ${r.job_url ? `<a class="btn small" href="${esc(r.job_url)}" target="_blank" rel="noopener">Posting ↗</a>` : ""}
-          ${r.job_url_direct && r.job_url_direct !== r.job_url ? `<a class="btn small" href="${esc(r.job_url_direct)}" target="_blank" rel="noopener">Company page ↗</a>` : ""}
+          ${webUrl(r.job_url) ? `<a class="btn small" href="${esc(r.job_url)}" target="_blank" rel="noopener">Posting ↗</a>` : ""}
+          ${webUrl(r.job_url_direct) && r.job_url_direct !== r.job_url ? `<a class="btn small" href="${esc(r.job_url_direct)}" target="_blank" rel="noopener">Company page ↗</a>` : ""}
         </div>
         ${r.archived ? `<div class="archived-banner">Archived ${fmtDate(r.archived_at)}. Hidden from the default view and search until you turn on “Include archived”.</div>` : ""}
       </div>

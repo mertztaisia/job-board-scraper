@@ -90,6 +90,12 @@ class ParsingTests(unittest.TestCase):
         self.assertTrue(daily_jobs.location_ok({"location": "Austin, TX", "is_remote": True}, prefs)[0])
         self.assertFalse(daily_jobs.location_ok({"location": "London, UK", "is_remote": True}, prefs)[0])
         self.assertFalse(daily_jobs.location_ok({"location": "San Francisco, CA"}, prefs)[0])
+        # "Remote" isn't a country: remote roles abroad are rejected, US ones kept.
+        for loc in ("Remote, Canada", "Remote, India", "Remote (Germany)", "Toronto, ON, Remote"):
+            self.assertFalse(daily_jobs.location_ok({"location": loc}, prefs)[0], loc)
+        for loc in ("Remote", "Remote, US", "Remote (USA)", "Remote, United States", "Remote (Austin, TX)",
+                    "Charlotte, NC, Remote", "Remote - California"):
+            self.assertTrue(daily_jobs.location_ok({"location": loc}, prefs)[0], loc)
 
     def test_evaluate_title_and_years(self):
         today = dt.date.today()
@@ -926,6 +932,14 @@ class AutoArchiveTests(TempDB):
         db.update_role(self.conn, rid, {}, note="a note added today")
         self.assertEqual(db.auto_archive_not_a_fit(self.conn), 1)
 
+    def test_added_and_marked_not_a_fit_in_the_same_second(self):
+        rid, _ = db.upsert_role(self.conn, job(job_url="https://example.com/same-second"))
+        db.update_role(self.conn, rid, {"status": "not_a_fit"})
+        when = (dt.datetime.now() - dt.timedelta(days=10)).isoformat(timespec="seconds")
+        self.conn.execute("UPDATE status_history SET at=? WHERE role_id=?", (when, rid))   # same timestamp
+        self.assertEqual(db.auto_archive_not_a_fit(self.conn), 1)
+        self.assertTrue(self.archived(rid))
+
     def test_unarchived_by_you_stays_unarchived(self):
         rid = self.not_a_fit_days_ago(10)
         db.auto_archive_not_a_fit(self.conn)
@@ -1109,6 +1123,39 @@ class ReviewFixTests(TempDB):
             r = self.client.patch(f"/api/roles/{rid}", json={field: value})
             self.assertEqual(r.status_code, 400, (field, value))
         self.assertIsNone(db.get_role(self.conn, rid)["pay_min"])
+
+    def test_huge_numbers_and_targets_are_a_400_not_a_crash(self):
+        rid, _ = db.upsert_role(self.conn, job())
+        self.conn.commit()
+        for field, value in (("years_min", 1e20), ("years_max", "1e300"), ("pay_max", 1e15)):
+            r = self.client.patch(f"/api/roles/{rid}", json={field: value})
+            self.assertEqual(r.status_code, 400, (field, value))
+        self.assertEqual(self.client.patch(f"/api/roles/{rid}", json={"years_min": 3}).status_code, 200)
+        for value in ("1e400", 1e20, -1, 2.5, "x", True):
+            r = self.client.put("/api/targets", json={"applications_per_week": value})
+            self.assertEqual(r.status_code, 400, value)
+        self.assertEqual(self.client.put("/api/targets", json={"applications_per_week": "12"})
+                         .get_json()["targets"]["applications_per_week"], 12)
+
+    def test_a_note_that_isnt_text_is_a_400(self):
+        rid, _ = db.upsert_role(self.conn, job())
+        self.conn.commit()
+        for path, payload in ((f"/api/roles/{rid}", {"note": {"x": 1}}),
+                              (f"/api/roles/{rid}/transition", {"status": "interested", "note": ["x"]})):
+            self.assertEqual(self.client.open(path, method="PATCH" if path.endswith(str(rid)) else "POST",
+                                              json=payload).status_code, 400, path)
+        self.assertEqual(db.get_role(self.conn, rid)["status"], "not_applied")
+
+    def test_only_web_links_are_saved(self):
+        rid, _ = db.upsert_role(self.conn, job())
+        self.conn.commit()
+        for value in ("javascript:alert(1)", "data:text/html,x", "JAVASCRIPT:alert(1)", "example.com/job"):
+            r = self.client.patch(f"/api/roles/{rid}", json={"job_url": value})
+            self.assertEqual(r.status_code, 400, value)
+            r = self.client.post("/api/roles", json={"title": "T", "company": "C", "job_url": value})
+            self.assertEqual(r.status_code, 400, value)
+        self.assertEqual(self.client.patch(f"/api/roles/{rid}", json={"job_url_direct": "https://acme.com/j/1"})
+                         .status_code, 200)
 
     def test_failed_pull_keeps_nothing_it_half_wrote(self):
         orig = db.mark_seen
@@ -1502,6 +1549,55 @@ class JobImportTests(TempDB):
             with self.assertRaises(job_import.ImportProblem, msg=bad):
                 job_import.fetch_page(job_import.normalize_url(bad))
         self.assertEqual(job_import.normalize_url(" jobs.example.com/1 "), "https://jobs.example.com/1")
+
+    def test_connection_to_a_private_address_is_refused(self):
+        # DNS rebinding: the name checked as public, but the connection went to a private address.
+        import ipaddress
+        import types
+        import job_import
+
+        class Resp:
+            def __init__(self, peer):
+                sock = types.SimpleNamespace(getpeername=lambda: (peer, 443))
+                self.raw = types.SimpleNamespace(connection=types.SimpleNamespace(sock=sock))
+                self.is_redirect, self.status_code, self.headers, self.encoding = False, 200, {"content-type": "text/html"}, None
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def iter_content(self, n): yield b"<html>job</html>"
+
+        class Session:
+            def __init__(self, peer): self.peer = peer
+            def get(self, url, **kw): return Resp(self.peer)
+        saved = job_import._check_public
+        job_import._check_public = lambda url: [ipaddress.ip_address("93.184.216.34")]
+        try:
+            with self.assertRaises(job_import.ImportProblem):
+                job_import.fetch_page("https://jobs.example.com/1", session=Session("127.0.0.1"))
+            self.assertEqual(job_import.fetch_page("https://jobs.example.com/1", session=Session("93.184.216.34")),
+                             ("https://jobs.example.com/1", "<html>job</html>"))
+        finally:
+            job_import._check_public = saved
+
+    def test_headless_browser_is_pinned_to_the_checked_address(self):
+        import ipaddress
+        import subprocess
+        import job_import
+        seen = {}
+
+        def run(cmd, **kw):
+            seen["cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, 0, stdout=b"<html>" + b"x" * 600 + b"</html>")
+        saved = (job_import.find_browser, job_import._check_public, subprocess.run)
+        job_import.find_browser = lambda: "chrome"
+        job_import._check_public = lambda url: [ipaddress.ip_address("2606:4700::1")]
+        subprocess.run = run
+        try:
+            self.assertTrue(job_import.render_page("https://jobs.example.com/1"))
+        finally:
+            job_import.find_browser, job_import._check_public, subprocess.run = saved
+        rules = next(a for a in seen["cmd"] if a.startswith("--host-resolver-rules="))
+        self.assertIn("MAP jobs.example.com [2606:4700::1]", rules)
+        self.assertIn("MAP localhost ~NOTFOUND", rules)
 
     def test_linkedin_page(self):
         page = """<html><body><h1 class="top-card-layout__title">Platform Engineer</h1>

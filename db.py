@@ -1112,6 +1112,7 @@ def upsert_role(conn, rec: dict, status="not_applied", note=None):
 REQUIRED_TEXT_FIELDS = {"title": "Title", "company": "Company"}
 NUMBER_FIELDS = {"pay_min": "Pay min", "pay_max": "Pay max", "offer_salary": "Offer salary"}
 WHOLE_NUMBER_FIELDS = {"years_min": "Years min", "years_max": "Years max"}
+URL_FIELDS = {"job_url": "Posting URL", "job_url_direct": "Company page URL"}
 DATE_FIELDS = {"applied_at": "Applied date", "offer_deadline": "Offer deadline", "date_posted": "Posted date"}
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?([+-]\d{2}:\d{2}|Z)?)?")
 
@@ -1134,8 +1135,12 @@ def check_role_changes(changes: dict) -> dict:
                 num = float(v)
                 if not math.isfinite(num) or num < 0:   # NaN, infinity or negative
                     raise ValueError
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 errors.append(f"{label} must be a number (0 or more).")
+                continue
+            top = 100 if k in WHOLE_NUMBER_FIELDS else 100_000_000   # beyond any real years / pay
+            if num > top:
+                errors.append(f"{label} must be at most {top:,}.")
                 continue
             if k in WHOLE_NUMBER_FIELDS:
                 if num != int(num):
@@ -1154,6 +1159,11 @@ def check_role_changes(changes: dict) -> dict:
                 v = (dt.date.fromisoformat(s) if len(s) == 10 else dt.datetime.fromisoformat(s).date()).isoformat()
             except ValueError:
                 errors.append(f"{DATE_FIELDS[k]} must be a date like 2026-11-21.")
+                continue
+        elif v is not None and k in URL_FIELDS:
+            # Only web links: a javascript: or data: link would run when its button is clicked.
+            if not isinstance(v, str) or not re.match(r"https?://[^\s/]+", v, re.I):
+                errors.append(f"{URL_FIELDS[k]} must be a web address starting with http:// or https://.")
                 continue
         elif k == "is_remote" and v is not None:
             flag = str(v).strip().lower() if not isinstance(v, bool) else str(int(v))
@@ -1176,6 +1186,7 @@ def update_role(conn, role_id: int, changes: dict, note=None, source=None) -> di
     row = conn.execute("SELECT * FROM roles WHERE id=?", (role_id,)).fetchone()
     if not row:
         return None
+    _check_text(note, "Note")
     changes = check_role_changes({k: v for k, v in changes.items() if k in EDITABLE_FIELDS})
     new_status = changes.get("status")
     if new_status and new_status not in STATUSES:
@@ -1471,10 +1482,12 @@ def auto_archive_not_a_fit(conn, prefs: dict | None = None) -> int:
     cutoff = (dt.datetime.now() - dt.timedelta(days=int(rule["days"]))).isoformat(timespec="seconds")
     # "since": when it last became Not a fit = its first Not a fit history entry after the
     # last entry with any other status (later notes on a Not a fit role don't reset it).
+    # Entries are ordered by time, then id: a role added and marked Not a fit in the same
+    # second has two entries with the same timestamp, and the later one still counts.
     rows = conn.execute(
         "SELECT r.id, (SELECT MIN(h.at) FROM status_history h WHERE h.role_id=r.id AND h.status='not_a_fit' "
-        "  AND h.at > COALESCE((SELECT MAX(o.at) FROM status_history o "
-        "                       WHERE o.role_id=r.id AND o.status != 'not_a_fit'), '')) AS since "
+        "  AND NOT EXISTS (SELECT 1 FROM status_history o WHERE o.role_id=r.id AND o.status != 'not_a_fit' "
+        "                  AND (o.at > h.at OR (o.at = h.at AND o.id > h.id)))) AS since "
         "FROM roles r WHERE r.status='not_a_fit' AND COALESCE(r.archived,0)=0").fetchall()
     n = 0
     for r in rows:
@@ -1703,7 +1716,7 @@ def transition(conn, role_id: int, data: dict) -> dict | None:
     if not row:
         return None
     status = data.get("status") or row["status"]
-    note = (data.get("note") or "").strip() or None
+    note = (_check_text(data.get("note"), "Note") or "").strip() or None
     changes = {"status": status}
     for k in ("applied_at", "resume_path", "offer_deadline", "offer_salary", "offer_details"):
         if k in data and data[k] not in (None, ""):

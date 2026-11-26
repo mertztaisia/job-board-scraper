@@ -83,11 +83,37 @@ def _check_public(url: str):
                                    proto=socket.IPPROTO_TCP)
     except (socket.gaierror, UnicodeError):
         raise ImportProblem(f"Couldn't find the site {parts.hostname}. Check the link.") from None
+    ips = []
     for info in infos:
         ip = ipaddress.ip_address(info[4][0].split("%")[0])
-        if not ip.is_global or ip.is_multicast:
-            raise ImportProblem("That link points to this computer or your local network; "
-                                "only public job pages can be read.")
+        if not _ip_is_public(ip):
+            raise ImportProblem(_NOT_PUBLIC)
+        ips.append(ip)
+    return ips
+
+
+_NOT_PUBLIC = "That link points to this computer or your local network; only public job pages can be read."
+
+
+def _ip_is_public(ip) -> bool:
+    return ip.is_global and not ip.is_multicast
+
+
+def _check_peer(resp, url: str):
+    """The address the request actually connected to must be public too. The name is looked
+    up again when connecting, so a site could answer the check above with a public address
+    and the connection with a private one (DNS rebinding). Skipped behind a proxy, where the
+    peer is the proxy."""
+    import requests
+    if requests.utils.get_environ_proxies(url):
+        return
+    try:
+        sock = resp.raw.connection.sock
+        peer = sock.getpeername()[0] if sock else None
+    except (AttributeError, OSError):
+        peer = None
+    if peer and not _ip_is_public(ipaddress.ip_address(peer.split("%")[0])):
+        raise ImportProblem(_NOT_PUBLIC)
 
 
 def fetch_page(url: str, session=None) -> tuple[str, str]:
@@ -104,6 +130,7 @@ def fetch_page(url: str, session=None) -> tuple[str, str]:
         except requests.RequestException as e:
             raise ImportProblem(f"Couldn't load the page ({type(e).__name__}).", retry=True) from None
         with resp:
+            _check_peer(resp, url)
             if resp.is_redirect and resp.headers.get("location"):
                 url = urljoin(url, resp.headers["location"])
                 continue
@@ -700,19 +727,24 @@ def find_browser() -> str | None:
 def render_page(url: str) -> str | None:
     """The page as a browser shows it after its scripts run (headless, with a fresh
     throwaway profile: none of your sign-ins or cookies). None if no browser is installed
-    or it fails. The link is checked to be public first, like a plain fetch."""
+    or it fails. The link is checked to be public first, like a plain fetch, and the browser
+    is pinned to the address that was checked, so the site's name can't be switched to a
+    private address afterwards; localhost names are blocked for everything the page loads."""
     import subprocess
     import tempfile
     exe = find_browser()
     if not exe:
         return None
-    _check_public(url)
+    ips = _check_public(url)
+    host = urlsplit(url).hostname
+    pin = f"[{ips[0]}]" if ips[0].version == 6 else str(ips[0])
+    rules = f"MAP {host} {pin}, MAP localhost ~NOTFOUND, MAP *.localhost ~NOTFOUND"
     with tempfile.TemporaryDirectory(prefix="jobtracker-browser-", ignore_cleanup_errors=True) as profile:
         try:
             out = subprocess.run(
                 [exe, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
                  "--disable-extensions", "--disable-sync", "--mute-audio", "--blink-settings=imagesEnabled=false",
-                 f"--user-data-dir={profile}", f"--virtual-time-budget={RENDER_WAIT_MS}", "--dump-dom", url],
+                 f"--user-data-dir={profile}", f"--host-resolver-rules={rules}", f"--virtual-time-budget={RENDER_WAIT_MS}", "--dump-dom", url],
                 capture_output=True, timeout=RENDER_TIMEOUT)
         except (OSError, subprocess.SubprocessError):
             return None
@@ -771,7 +803,7 @@ def import_from_url(url: str, use_ai: bool = False, fetch=None, ai=None, render=
         parsed = _parse(page, site) if page else None
         may_render = site != "linkedin" and (parsed is not None or (problem is not None and problem.retry))
         if (parsed is None or parsed["thin"]) and may_render:
-            rendered = (render or render_page)(url)
+            rendered = (render or render_page)(final_url)   # after redirects, each one checked
             if rendered:
                 again = _parse(rendered, site)
                 if parsed is None or len(again["text"]) > len(parsed["text"]):

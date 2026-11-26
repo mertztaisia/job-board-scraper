@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 
 import db
 
@@ -32,7 +33,16 @@ def save_targets(conn, data: dict) -> dict:
     for k in DEFAULT_TARGETS:
         if k in data:
             v = data[k]
-            t[k] = None if v in (None, "") else max(0, int(v))
+            if v in (None, ""):
+                t[k] = None
+                continue
+            try:
+                n = float(v) if not isinstance(v, bool) else None
+            except (TypeError, ValueError):
+                n = None
+            if n is None or not math.isfinite(n) or n != int(n) or not 0 <= n <= 10_000:
+                raise ValueError(f"{k} must be a whole number from 0 to 10,000.")
+            t[k] = int(n)
     conn.execute("INSERT INTO settings(key, value) VALUES('targets', ?) "
                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(t),))
     conn.commit()

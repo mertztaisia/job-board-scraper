@@ -506,8 +506,13 @@ def location_ok(job: dict, prefs: dict) -> tuple[bool, str]:
     loc = job.get("location") or ""
     parts = [p.strip() for p in loc.split(",") if p.strip()]
     if job.get("is_remote") or "remote" in loc.lower():
-        us = (not parts or any(p.lower() in ("usa", "us", "united states", "remote") for p in parts)
-              or (len(parts) > 1 and parts[1].lower() in US_STATES))
+        # The word "Remote" says nothing about the country, so drop it before checking:
+        # "Remote" alone is fine, "Remote, Canada" or "Remote (India)" isn't.
+        places = [q for q in (re.sub(r"\bremote\b|[()]", " ", p, flags=re.I).strip(" -–").lower()
+                              for p in parts) if q]
+        us = (not places
+              or any(p in ("usa", "us", "u.s.", "united states", "united states of america")
+                     or p in US_STATES or p in US_STATES.values() for p in places))
         where = "Remote" + (f" ({loc})" if loc and "remote" not in loc.lower() else "")
         return bool(prefs["locations"].get("include_remote")) and us, where
     city, state = _parse_place(loc)
