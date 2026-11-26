@@ -403,6 +403,10 @@ class PreferenceValidationTests(TempDB):
         self.assertEqual(db.validate_prefs(db.get_prefs(self.conn)), [])
         self.conn.execute("UPDATE settings SET value=? WHERE key='preferences'", (json.dumps({"sites": ["google"]}),))
         self.assertEqual(db.get_prefs(self.conn)["sites"], db.DEFAULT_PREFS["sites"])
+        # A hand-edited list with non-text entries doesn't break reading preferences.
+        self.conn.execute("UPDATE settings SET value=? WHERE key='preferences'",
+                          (json.dumps({"sites": [["x"], {"a": 1}, "indeed"]}),))
+        self.assertEqual(db.get_prefs(self.conn)["sites"], ["indeed"])
 
     def test_needs_a_location_or_remote(self):
         p = self.prefs_with(locations__include_remote=False)

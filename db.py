@@ -681,7 +681,8 @@ def get_prefs(conn) -> dict:
     # Drop boards that are no longer offered (Google Jobs) from older saved preferences, so
     # pulls skip them and the next save passes validation.
     if isinstance(prefs.get("sites"), list):
-        prefs["sites"] = [s for s in prefs["sites"] if s in SITES] or list(DEFAULT_PREFS["sites"])
+        prefs["sites"] = ([s for s in prefs["sites"] if isinstance(s, str) and s in SITES]
+                          or list(DEFAULT_PREFS["sites"]))
     return prefs
 
 
