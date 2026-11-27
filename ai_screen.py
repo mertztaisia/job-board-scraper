@@ -37,6 +37,10 @@ MAX_WORKERS = 4
 MATCH_TO_VERDICT = {"strong": "fit", "good": "fit", "partial": "fit", "weak": "fit",
                     "not_a_fit": "not_a_fit", "unknown": "unsure"}
 
+# Whether a remote role can be done from the US. The rule filter lets every remote role
+# through; this answer is what turns away remote roles abroad.
+REMOTE_US = ("yes", "no", "unclear", "not_remote")
+
 SCHEMA = {
     "type": "object",
     "properties": {
@@ -48,9 +52,10 @@ SCHEMA = {
         "years_max": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
         "pay_min": {"anyOf": [{"type": "number"}, {"type": "null"}]},
         "pay_max": {"anyOf": [{"type": "number"}, {"type": "null"}]},
+        "remote_us": {"type": "string", "enum": list(REMOTE_US)},
     },
     "required": ["match", "reason", "violated_requirements",
-                 "interests_matched", "years_min", "years_max", "pay_min", "pay_max"],
+                 "interests_matched", "years_min", "years_max", "pay_min", "pay_max", "remote_us"],
     "additionalProperties": False,
 }
 
@@ -152,6 +157,7 @@ Rules:
 - Title words to avoid mean the job's seniority or role (e.g. a "Staff Engineer" or "Solutions Architect" title), not domain words in the team name (e.g. "IAM Architecture", "Platform Leadership team").
 - interests_matched: only items from the Interests list that genuinely apply to the role's work, spelled exactly as listed.
 - years_min/years_max and pay_min/pay_max: what the posting states (annual USD; convert hourly x2080), else null.
+- remote_us: can someone living in the US take this job fully remote? "yes" if the posting allows working from the US (a US location, "US only", "anywhere", or a list of countries that includes the US); "no" if it is limited to other countries or regions (e.g. "Remote, Canada", "EMEA", "must live in India"); "unclear" if it is remote but says nothing about where; "not_remote" if it is on-site or hybrid.
 - reason: one plain sentence a person can scan."""
 
 
@@ -202,19 +208,29 @@ def screen_one(cli, model: str, system: str, role: dict) -> tuple[dict, int, int
 EXP_RE = re.compile(r"\b(years?|yrs?|experience)\b", re.I)
 TITLE_RE = re.compile(r"\btitle\b", re.I)
 PAY_WORDS = ("pay", "salary", "compensation", "$")
-# A remote objection about the country/region is real even for a remote role.
-NON_US_RE = re.compile(r"\b(outside|non-us|non-u\.s\.|international|countr(?:y|ies)|europe|emea|apac|"
-                       r"latam|canada|uk|india|mexico|global|worldwide)\b", re.I)
+def _is_remote(role: dict) -> bool:
+    return bool(role.get("is_remote")) or "remote" in (role.get("location") or "").lower()
 
 
-def check_experience_verdict(result: dict, prefs: dict, role: dict | None = None) -> dict:
-    """Double-check a not_a_fit verdict against hard numbers. Small models sometimes
-    misread ranges (a 4-year minimum vs a 4-year max), reject vague wording
-    ("extensive experience", "Engineer III") with no stated years, or misread listed pay.
-    Objections the data contradicts are dropped; if none remain, the role is kept."""
+def check_verdict(result: dict, prefs: dict, role: dict | None = None) -> dict:
+    """Double-check the AI's verdict.
+    A remote role the AI says can't be done from the US (remote_us "no") is Not a fit
+    when location is a must-have, whatever match level it picked.
+    A not_a_fit verdict is checked against hard numbers: small models sometimes misread
+    ranges (a 4-year minimum vs a 4-year max), reject vague wording ("extensive
+    experience", "Engineer III") with no stated years, or misread listed pay, or object
+    that a remote role isn't in one of your cities. Objections the data contradicts are
+    dropped; if none remain, the role is kept."""
+    role = role or {}
+    loc = prefs["locations"]
+    remote_ok = _is_remote(role) and loc.get("include_remote")
+    if remote_ok and result.get("remote_us") == "no" and loc.get("mandatory")             and result.get("verdict") != "not_a_fit":
+        result["verdict"] = result["match"] = "not_a_fit"
+        result["violated_requirements"] = ["remote only outside the US"]
+        result["reason"] = f"Remote role that can't be done from the US. AI note: {result.get('reason', '')}"
+        return result
     if result.get("verdict") != "not_a_fit":
         return result
-    role = role or {}
     exp, sal = prefs["experience"], prefs["salary"]
     lo = result.get("years_min")
     if lo is None:
@@ -225,8 +241,8 @@ def check_experience_verdict(result: dict, prefs: dict, role: dict | None = None
         fl = f.lower()
         if any(w in fl for w in PAY_WORDS) and pay_top and sal.get("min_top") and pay_top >= sal["min_top"]:
             dropped.append(f"listed pay tops out at ${pay_top:,.0f}")
-        elif ("remote" in fl and not NON_US_RE.search(f) and role.get("is_remote")
-              and prefs["locations"].get("include_remote")):
+        elif "remote" in fl and remote_ok and result.get("remote_us") in ("yes", "unclear"):
+            # The AI confirmed it's remote and open to the US; the objection is about the city.
             dropped.append("it's a remote role and remote US roles are allowed")
         elif EXP_RE.search(f) and not TITLE_RE.search(f) and (lo is None or lo <= exp["max"]):
             dropped.append(f"stated minimum {lo} yrs is within {exp['min']}-{exp['max']}" if lo is not None
@@ -291,7 +307,7 @@ def screen_roles(conn, role_ids: list[int], prefs: dict | None = None, log=print
                 continue
             with lock:
                 # keep only tags that are actually in the interests list
-                result = check_experience_verdict(result, prefs, role)
+                result = check_verdict(result, prefs, role)
                 result["interests_matched"] = [interests[t.lower()] for t in
                                                result.get("interests_matched", [])
                                                if t.lower() in interests]

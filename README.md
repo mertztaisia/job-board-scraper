@@ -238,7 +238,7 @@ If you set it up earlier with `run_daily.bat`, running this replaces it.
 
 ## Search filters (Preferences page)
 Filters are edited on the Preferences page and stored in the database, so your own search never lives in the code. A new install starts from neutral defaults: the search term "software engineer", posted in the last 24 hours, full-time, remote roles in the US (add your cities), and no experience, pay or title limits. Set the rest on the Preferences page:
-- **Location:** cities with a radius, plus remote roles in the US. NYC boroughs count as New York.
+- **Location:** cities with a radius, plus remote roles in the US. NYC boroughs count as New York. With remote roles on, every remote listing passes the filters; the AI screen reads the posting and decides whether it can be done from the US, and marks remote roles limited to other countries Not a fit. With AI screening off (or no description), remote roles abroad aren't filtered out.
 - **Title:** words the title must include or must not include. When "must not include" is a must-have, senior level numbers such as "Engineer 5" or "E4" are removed too.
 - **Experience:** the range of required years; when a description states its minimum, it must fit.
 - **Pay:** the least the top of the posted range can be.

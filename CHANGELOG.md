@@ -27,8 +27,10 @@ new one with `release.py`. Write changes under **Unreleased** as you go.
   the redirect again.
 - A board that refuses every search in a pull is now reported instead of silently returning
   nothing: "ZipRecruiter blocked your searches" (or LinkedIn, Indeed, ...) in the pull summary and log.
-- Remote roles abroad ("Remote, Canada", "Toronto, ON, CA") no longer pass the US location rule,
-  and US-only wordings ("Remote - US only", "US-based remote") are recognised.
+- Remote roles abroad ("Remote, Canada", "must live in the EU") are marked Not a fit. The AI screen
+  now says whether a remote role can be done from the US and decides this from the whole posting;
+  the location filter lets every remote role through. A remote role the AI reads as hybrid or
+  on-site in another city is no longer kept just because the job board called it remote.
 - Huge numbers (years, pay, weekly targets, values the AI returns) and notes that aren't text
   give a clear message instead of a server error; the command line `add` checks values too.
 - Roles added and marked Not a fit in the same second are archived automatically like the rest.

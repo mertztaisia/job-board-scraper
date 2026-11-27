@@ -88,20 +88,13 @@ class ParsingTests(unittest.TestCase):
         prefs = {"locations": dict(TEST_PREFS["locations"])}
         self.assertTrue(daily_jobs.location_ok({"location": "Brooklyn, NY"}, prefs)[0])
         self.assertTrue(daily_jobs.location_ok({"location": "Austin, TX", "is_remote": True}, prefs)[0])
-        self.assertFalse(daily_jobs.location_ok({"location": "London, UK", "is_remote": True}, prefs)[0])
         self.assertFalse(daily_jobs.location_ok({"location": "San Francisco, CA"}, prefs)[0])
-        # "Remote" isn't a country: remote roles abroad are rejected, US ones kept.
-        for loc in ("Remote, Canada", "Remote, India", "Remote (Germany)", "Toronto, ON, Remote"):
-            self.assertFalse(daily_jobs.location_ok({"location": loc}, prefs)[0], loc)
-        for loc in ("Remote", "Remote, US", "Remote (USA)", "Remote, United States", "Remote (Austin, TX)",
-                    "Charlotte, NC, Remote", "Remote - California",
-                    # US-only wordings
-                    "Remote - US only", "Remote (US only)", "US-based remote", "Remote, USA-based", "Remote in USA",
-                    "Remote / US", "Remote | United States", "Remote; USA", "Anywhere in the US", "Remote - Worldwide",
-                    "Remote, US or Canada", "Remote, New Mexico", "Remote, OR"):
+        # Every remote role passes the rule filter; the AI screen decides whether it's open to the US.
+        for loc in ("Remote", "Remote, US", "Remote, Canada", "London, UK", "Toronto, ON, Remote"):
             self.assertTrue(daily_jobs.location_ok({"location": loc, "is_remote": True}, prefs)[0], loc)
-        for loc in ("Toronto, ON, CA", "Remote, EMEA", "Remote - Europe", "Remote, Toronto"):
-            self.assertFalse(daily_jobs.location_ok({"location": loc}, prefs)[0], loc)
+        self.assertTrue(daily_jobs.location_ok({"location": "Remote - EMEA"}, prefs)[0])
+        no_remote = {"locations": {**prefs["locations"], "include_remote": False}}
+        self.assertFalse(daily_jobs.location_ok({"location": "Remote, US", "is_remote": True}, no_remote)[0])
 
     def test_evaluate_title_and_years(self):
         today = dt.date.today()
@@ -111,10 +104,10 @@ class ParsingTests(unittest.TestCase):
 
 
 class VerdictCheckTests(unittest.TestCase):
-    def check(self, flags, years_min=None, role=None):
+    def check(self, flags, years_min=None, role=None, remote_us="not_remote"):
         result = {"verdict": "not_a_fit", "match": "not_a_fit", "reason": "x",
-                  "violated_requirements": flags, "years_min": years_min}
-        return ai_screen.check_experience_verdict(result, TEST_PREFS, role or {})
+                  "violated_requirements": flags, "years_min": years_min, "remote_us": remote_us}
+        return ai_screen.check_verdict(result, TEST_PREFS, role or {})
 
     def test_title_seniority_is_kept(self):
         r = self.check(["Senior-level title"])
@@ -130,9 +123,35 @@ class VerdictCheckTests(unittest.TestCase):
         self.assertEqual(self.check(["requires 6+ years"], years_min=6)["verdict"], "not_a_fit")
 
     def test_remote(self):
-        role = {"is_remote": True}
-        self.assertEqual(self.check(["not remote-friendly location"], role=role)["verdict"], "fit")
-        self.assertEqual(self.check(["remote, but only outside the US"], role=role)["verdict"], "not_a_fit")
+        role = {"is_remote": True, "location": "San Jose, CA"}
+        # Open to the US (or not saying where): an objection that it isn't in your city is dropped.
+        for answer in ("yes", "unclear"):
+            r = self.check(["remote role, not in New York"], role=role, remote_us=answer)
+            self.assertEqual(r["verdict"], "fit", answer)
+        # Abroad, or the AI read it as hybrid/on-site after all: the objection stands.
+        for answer in ("no", "not_remote"):
+            r = self.check(["location San Jose (hybrid), not remote"], role=role, remote_us=answer)
+            self.assertEqual(r["verdict"], "not_a_fit", answer)
+        # Not a remote role at all: nothing to drop.
+        self.assertEqual(self.check(["not remote"], role={}, remote_us="yes")["verdict"], "not_a_fit")
+
+    def test_remote_abroad_is_not_a_fit(self):
+        result = {"verdict": "fit", "match": "good", "reason": "Nice role.", "violated_requirements": [],
+                  "remote_us": "no"}
+        r = ai_screen.check_verdict(dict(result), TEST_PREFS, {"is_remote": True, "location": "Remote, Canada"})
+        self.assertEqual((r["verdict"], r["match"]), ("not_a_fit", "not_a_fit"))
+        self.assertEqual(r["violated_requirements"], ["remote only outside the US"])
+        self.assertIn("can't be done from the US", r["reason"])
+        # Location only a nice-to-have, or remote not allowed: left to the AI's own verdict.
+        loose = {**TEST_PREFS, "locations": {**TEST_PREFS["locations"], "mandatory": False}}
+        self.assertEqual(ai_screen.check_verdict(dict(result), loose, {"is_remote": True})["verdict"], "fit")
+        # An office role isn't affected by the remote answer.
+        self.assertEqual(ai_screen.check_verdict(dict(result), TEST_PREFS, {"location": "Brooklyn, NY"})["verdict"],
+                         "fit")
+
+    def test_schema_and_prompt_ask_about_remote_us(self):
+        self.assertIn("remote_us", ai_screen.SCHEMA["required"])
+        self.assertIn("remote_us:", ai_screen.build_system_prompt(db.DEFAULT_PREFS))
 
 
 class DuplicateTests(TempDB):
